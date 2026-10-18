@@ -1,67 +1,103 @@
-TF-C + DINOv3 – Thay thế hai Encoder của mô hình TF-C
+F-C + DINOv3 – Thay thế hai Encoder của mô hình TF-C
 
 1. Giới thiệu
-Dự án được phát triển từ mã nguồn TF-C Pretraining, một mô hình học biểu diễn chuỗi thời gian từ hai nhánh thời gian và tần số.
-Yêu cầu thực hiện: Thay Encoder (Backbone) của TF-C bằng DINOv3 và đưa mã nguồn đã cập nhật lên GitHub, kèm README chỉ rõ những chỗ đã sửa.
-Trong phiên bản này, em thay cả hai Transformer Encoder của bản code TF-C bằng hai backbone DINOv3 ViT-S/16 riêng biệt. Do DINOv3 xử lý ảnh, em bổ sung bước chuyển tín hiệu EEG một chiều thành ảnh để đưa vào mô hình.
+Dự án được thực hiện dựa trên mã nguồn TF-C Pretraining. TF-C là mô hình học đặc trưng từ dữ liệu chuỗi thời gian thông qua hai nhánh: miền thời gian và miền tần số.
+Trong bài tập này, em thay thế cả hai Transformer Encoder trong phiên bản mã nguồn TF-C bằng hai backbone DINOv3 ViT-S/16 pretrained độc lập. Vì DINOv3 nhận đầu vào là ảnh, em bổ sung bước chuyển tín hiệu EEG một chiều thành ảnh trước khi đưa vào mô hình.
+Mục tiêu chính là thay backbone, điều chỉnh code để mô hình chạy được và kiểm tra kết quả, không phải chứng minh DINOv3 có độ chính xác cao hơn TF-C gốc.
 
 2. Những thay đổi trong mã nguồn
-File	Nội dung đã cập nhật
-[`code/TFC/model.py`](code/TFC/model.py)	Thay cả Time Encoder và Frequency Encoder từ Transformer sang DINOv3; lấy đặc trưng và đưa qua hai projector.
-[`code/TFC/dinov3_adapter.py`](code/TFC/dinov3_adapter.py)	File mới. Chuyển EEG thành ảnh miền thời gian (tín hiệu, độ biến thiên, đường bao) và ảnh phổ miền tần số (log-STFT), kích thước 224 × 224.
-[`code/TFC/dataloader.py`](code/TFC/dataloader.py)	Điều chỉnh dữ liệu và cách tạo dữ liệu tăng cường để phù hợp với hai nhánh DINOv3; bổ sung cách chọn tập con để chạy thử.
-[`code/TFC/main.py`](code/TFC/main.py)	Bổ sung tham số chọn backbone, kích thước ảnh và chế độ --subset; đặt tên thư mục checkpoint riêng cho DINOv3.
-[`code/TFC/trainer.py`](code/TFC/trainer.py)	Điều chỉnh một số phần xử lý khi huấn luyện, đánh giá và tải checkpoint.
-[`code/TFC/requirements-dinov3.txt`](code/TFC/requirements-dinov3.txt)	File mới. Danh sách thư viện bổ sung.
-[`code/TFC/smoke_test_dinov3.py`](code/TFC/smoke_test_dinov3.py)	File mới. Kiểm tra đầu vào, đầu ra và gradient bằng backbone giả lập.
+2.1. Thay cả hai Encoder bằng DINOv3
+File đã sửa: [`code/TFC/model.py`](code/TFC/model.py)
+Ban đầu: Mã nguồn sử dụng transformer_encoder_t để xử lý nhánh thời gian và transformer_encoder_f để xử lý nhánh tần số.
+Sau khi sửa:
+- Thay transformer_encoder_t bằng encoder_t sử dụng mô hình DINOv3 ViT-S/16.
+- Thay transformer_encoder_f bằng encoder_f sử dụng một mô hình DINOv3 ViT-S/16 riêng biệt.
+- Cập nhật hàm forward() để chuyển tín hiệu thành hai ảnh tương ứng, đưa mỗi ảnh qua một backbone rồi lấy đặc trưng.
+- Mỗi DINOv3 trích xuất vector đặc trưng 384 chiều. Hai projector chuyển các vector này về 128 chiều cho từng nhánh.
+- Khi phân loại, hai vector 128 chiều được ghép thành vector 256 chiều để đưa vào bộ phân loại.
+Như vậy, phần thay đổi chính là bộ trích xuất đặc trưng; mô hình vẫn giữ hướng tiếp cận thời gian – tần số và cơ chế học tương phản của TF-C trong phiên bản code sử dụng.
+2.2. Chuyển tín hiệu EEG thành ảnh cho DINOv3
+File tạo mới: [`code/TFC/dinov3_adapter.py`](code/TFC/dinov3_adapter.py)
+EEG là chuỗi số một chiều, còn DINOv3 được huấn luyện trước trên ảnh. Vì vậy, em tạo bộ chuyển đổi đầu vào gồm hai cách biểu diễn:
+- Ảnh miền thời gian: Kết hợp tín hiệu gốc, độ biến thiên và đường bao biên độ thành ba kênh ảnh.
+- Ảnh miền tần số: Sử dụng STFT để tạo ảnh phổ thời gian – tần số, lấy giá trị theo thang log rồi chuyển thành ảnh ba kênh.
+Cả hai ảnh được đưa về kích thước 224 × 224 và chuẩn hóa để phù hợp với DINOv3.
+Đây là cách biểu diễn được xây dựng để thử nghiệm khả năng áp dụng DINOv3 cho EEG, không phải cách biểu diễn chính thức của TF-C gốc.
+2.3. Điều chỉnh phần chuẩn bị dữ liệu
+File đã sửa: [`code/TFC/dataloader.py`](code/TFC/dataloader.py)
+- Điều chỉnh nhánh tần số để đưa tín hiệu dạng sóng vào bộ chuyển đổi ảnh phổ, thay vì trực tiếp dùng độ lớn FFT một chiều làm đầu vào Encoder.
+- Với tăng cường dữ liệu miền tần số, thực hiện biến đổi FFT, thay đổi một số thành phần tần số rồi dùng iFFT để đưa về tín hiệu một chiều.
+- Điều chỉnh tùy chọn lấy một phần dữ liệu (--subset) để kiểm tra chương trình với ít mẫu hơn khi chạy trên CPU, bao gồm tập test ở chế độ chạy thử.
+2.4. Bổ sung các tham số chạy chương trình
+File đã sửa: [`code/TFC/main.py`](code/TFC/main.py)
+Tham số	Mục đích
+--backbone_name	Chọn checkpoint DINOv3 pretrained.
+--unfreeze_backbone	Cho phép cập nhật trọng số của backbone nếu cần; mặc định backbone được đóng băng.
+--image_size	Chọn kích thước ảnh đưa vào mô hình.
+--n_fft	Thiết lập tham số FFT cho ảnh phổ STFT.
+--subset	Chỉ lấy một phần dữ liệu để chạy thử.
+
+Em cũng đặt tên thư mục lưu checkpoint có hậu tố dinov3_both để phân biệt với mô hình Transformer cũ.
+2.5. Điều chỉnh quá trình huấn luyện
+File đã sửa: [`code/TFC/trainer.py`](code/TFC/trainer.py)
+- Sửa bước xóa gradient trong quá trình Pre-training trước khi tính gradient mới.
+- Sử dụng kích thước batch thực tế khi tính NT-Xent loss.
+- Thay cách dùng kiểu dữ liệu NumPy đã cũ để tương thích với thư viện hiện tại.
+- Điều chỉnh việc tải checkpoint với map_location để có thể chạy trên CPU.
+Những thay đổi này giúp chương trình hoạt động ổn định hơn với backbone mới; không thay thế mục tiêu học tương phản đang được cài đặt trong mã nguồn TF-C.
+2.6. Bổ sung thư viện và các file kiểm tra
+- [`code/TFC/requirements-dinov3.txt`](code/TFC/requirements-dinov3.txt) (file mới): Khai báo những thư viện bổ sung cần thiết cho phiên bản DINOv3.
+- [`code/TFC/smoke_test_dinov3.py`](code/TFC/smoke_test_dinov3.py) (file mới): Kiểm tra kích thước ảnh, đầu ra của hai nhánh và gradient của projector bằng backbone giả lập.
+- [`code/TFC/test_real_dinov3.py`](code/TFC/test_real_dinov3.py) (file kiểm tra): Thử chạy ảnh EEG qua một backbone DINOv3 pretrained thật.
+- [`code/TFC/test_two_real_dinov3.py`](code/TFC/test_two_real_dinov3.py) (file kiểm tra): Kiểm tra hai backbone DINOv3 thật hoạt động độc lập trong cùng mô hình.
+Phạm vi thay đổi: Chủ yếu ở code/TFC/. Các mô hình so sánh trong code/baselines/ không được thay backbone.
+
+3. Kết quả thực hiện
+3.1. Kiểm tra hai backbone DINOv3
+Em đã tải được trọng số DINOv3 ViT-S/16 từ Hugging Face và chạy forward thành công với EEG thật:
+Thành phần	Kích thước đầu ra
+Time Encoder	384 chiều
+Time Projector	128 chiều
+Frequency Encoder	384 chiều
+Frequency Projector	128 chiều
+Ghép hai vector projector	256 chiều
 
 
-Vị trí thay backbone chính: code/TFC/model.py, tại hai thành phần encoder_t và encoder_f. Mỗi nhánh dùng một DINOv3 độc lập; đặc trưng 384 chiều được chiếu về 128 chiều mỗi nhánh rồi ghép thành 256 chiều cho bộ phân loại.
-Các mô hình khác trong code/baselines không sửa.
-3. Kết quả đã thực hiện
-Kiểm tra hai backbone DINOv3 thật:
-- Tải được trọng số pretrained DINOv3 ViT-S/16 từ Hugging Face.
-- Chạy thành công cả hai Encoder độc lập với dữ liệu EEG thật.
-- Đầu ra hai nhánh đều có kích thước 384 chiều; qua projector còn 128 chiều mỗi nhánh.
-- Vector ghép có kích thước 256 chiều và không chứa giá trị NaN/Inf.
-Pre-training trên SleepEEG:
+Kết quả kiểm tra xác nhận hai Encoder là hai mô hình độc lập và các vector đầu ra không chứa giá trị NaN/Inf.
+3.2. Pre-training trên SleepEEG
+Chạy thử trên 1.280 mẫu SleepEEG với tùy chọn --subset:
 Nội dung	Kết quả
-Dữ liệu chạy thử	1.280 mẫu SleepEEG (--subset)
 Số epoch	20
-Training Loss epoch 1	5.2391
-Training Loss epoch 20	2.0547
-Thời gian	23 phút 56 giây
-Checkpoint	Lưu thành công tại code/experiments_logs/.../pre_train_seed_42_dinov3_both/saved_models/ckp_last.pt
+Training Loss – epoch 1	5.2391
+Training Loss – epoch 20	2.0547
+Thời gian chạy	23 phút 56 giây
+Lưu checkpoint	Thành công
 
 
-Fine-tuning và Testing trên Epilepsy:
-- Hoàn thành 20 epoch Fine-tuning và bước Testing.
-- Dữ liệu Fine-tuning: 60 mẫu; tập Testing ở chế độ chạy thử: 600 mẫu (--subset).
-- Thời gian Fine-tuning và Testing: 1 giờ 28 phút 46 giây.
+Checkpoint được lưu trong thư mục code/experiments_logs/SleepEEG_2_Epilepsy/run1/pre_train_seed_42_dinov3_both/saved_models/ 
+Nhận xét: Loss giảm qua 20 epoch, cho thấy quá trình Pre-training đã chạy được với hai DINOv3. Loss giảm chưa đủ để kết luận mô hình phân loại tốt hơn.
+3.3. Fine-tuning và Testing trên Epilepsy
+Em tiếp tục sử dụng checkpoint Pre-training để chạy 20 epoch Fine-tuning và Testing. Trong chế độ --subset, tập Fine-tuning gồm 60 mẫu, tập Testing gồm 600 mẫu. Thời gian chạy khoảng 1 giờ 28 phút 46 giây.
 Bộ phân loại	Accuracy	F1-score	AUROC	AUPRC
 MLP	18,50%	15,61%	42,54%	50,38%
 KNN	85,50%	64,16%	74,68%	73,29%
 
-
-Các số liệu được lấy từ log chạy thử: MLP dùng dòng “Best Testing Performance”, KNN dùng kết quả xuất hiện ở epoch 2–20. Log KNN hiển thị chỉ số dưới dạng từ 0 đến 1 nên đã đổi sang phần trăm cho thống nhất. Đây là kết quả trên tập test con 600 mẫu, không phải đánh giá chính thức trên toàn bộ Epilepsy.
-Nhận xét: Mô hình đã chạy được đủ quy trình từ Pre-training đến Fine-tuning và Testing. Loss ở giai đoạn Pre-training giảm, nhưng kết quả của MLP còn thấp và log có cảnh báo về Precision do có lớp chưa được dự đoán. Kết quả này chưa đủ để kết luận DINOv3 cải thiện so với TF-C gốc.
-
 4. Cách chạy
-Tại thư mục code/TFC, cài thư viện:
+Mở Terminal tại thư mục code/TFC, sau đó cài thư viện:
 pip install -r requirements-dinov3.txt
-Trọng số DINOv3 yêu cầu được cấp quyền trên Hugging Face. Sau khi được chấp thuận, đăng nhập:
+Checkpoint DINOv3 cần được cấp quyền truy cập trên Hugging Face. Sau khi được chấp thuận, đăng nhập:
 hf auth login
-Kiểm tra mô hình:
+Kiểm tra cấu trúc mô hình:
 python smoke_test_dinov3.py
-Pre-training:
+Chạy Pre-training với dữ liệu SleepEEG:
 python main.py --training_mode pre_train --pretrain_dataset SleepEEG --target_dataset Epilepsy --device cpu --subset
-Fine-tuning và Testing (sử dụng checkpoint Pre-training đã tạo):
+Chạy Fine-tuning và Testing trên Epilepsy bằng checkpoint vừa tạo:
 python main.py --training_mode fine_tune_test --pretrain_dataset SleepEEG --target_dataset Epilepsy --device cpu --subset
-Cần chuẩn bị dữ liệu SleepEEG và Epilepsy theo cấu trúc thư mục mà mã nguồn TF-C yêu cầu. Tùy chọn --subset dùng để chạy thử trên một phần dữ liệu, giúp giảm thời gian thực hiện. Trọng số DINOv3 và checkpoint huấn luyện không được đưa kèm trong repository.
-
+Dữ liệu: Cần chuẩn bị các file .pt của SleepEEG và Epilepsy theo cấu trúc mà bộ nạp dữ liệu của dự án yêu cầu. Tùy chọn --subset chỉ dùng để chạy thử nhanh. Mã nguồn trên GitHub không kèm dữ liệu lớn, checkpoint huấn luyện hoặc trọng số DINOv3.
 5. Kết luận
-Em đã hoàn thành việc thay cả hai Encoder của TF-C bằng DINOv3, bổ sung bước chuyển đổi tín hiệu EEG sang ảnh và chạy thành công cả Pre-training 20 epochs lẫn Fine-tuning/Testing 20 epochs trên tập dữ liệu chạy thử. Các kết quả hiện tại chủ yếu chứng minh mã nguồn sau khi thay backbone có thể chạy được; việc cải thiện độ chính xác cần được đánh giá thêm trên tập dữ liệu đầy đủ và so sánh công bằng với mô hình gốc.
+Em đã thay thành công cả hai Encoder của TF-C bằng DINOv3, bổ sung cách chuyển EEG thành ảnh và chạy được toàn bộ quá trình Pre-training → Fine-tuning → Testing với dữ liệu chạy thử.
+Kết quả hiện tại xác nhận mã nguồn đã thay backbone có thể hoạt động. Để đánh giá chất lượng mô hình một cách đầy đủ, cần chạy trên tập test hoàn chỉnh và so sánh với TF-C gốc trong cùng điều kiện.
 Tài liệu tham khảo
-- TF-C – mã nguồn gốc của Harvard
+- TF-C Pretraining – mã nguồn gốc
 - DINOv3 – mã nguồn Meta
 - DINOv3 ViT-S/16 – Hugging Face
