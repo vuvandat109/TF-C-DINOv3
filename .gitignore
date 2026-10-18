@@ -1,0 +1,28 @@
+**/__pycache__/
+**/.DS_Store
+old_README.md
+**/.idea
+datasets
+*.log
+*.pt
+*.zip
+# Python virtual environment
+.venv/
+venv/
+
+# Hugging Face and secret files
+.env
+.env.*
+!.env.example
+*.token
+
+# Model checkpoints
+*.pth
+*.ckpt
+*.safetensors
+
+# Generated experiment files
+experiments_logs/
+runs/
+wandb/
+code/TFC/visualizations/
