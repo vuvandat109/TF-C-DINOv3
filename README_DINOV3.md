@@ -25,7 +25,7 @@ Kiểm thử encoder với backbone giả lập	[`code/TFC/smoke_test_dinov3.py`
 Kiểm thử hai encoder pretrained thật	[`code/TFC/test_two_real_dinov3.py`](code/TFC/test_two_real_dinov3.py)
 
 
-2. Kiến trúc hệ thống (System Overview)
+2. Kiến trúc hệ thống 
                  EEG: [B, 1, 178]
                         |
                SignalImageAdapter
@@ -71,8 +71,8 @@ L_cross = mean(
 L_pretrain = 0.2 * L_time + 0.2 * L_freq + 1.0 * L_cross
 L_finetune = CrossEntropy + 0.1 * L_pretrain
 Temperature = 0.2
-Đây là biến thể Loss dành cho thử nghiệm TF-C + DINOv3, không phải công thức nguyên bản được công bố trong bài báo TF-C. Mặc định hai backbone DINOv3 được đóng băng; các projector và classifier được huấn luyện.
-3. Môi trường (Environment)
+
+3. Môi trường 
 Thành phần	Yêu cầu / thông tin
 Hệ điều hành đã chạy	Windows, PowerShell trong VS Code
 Python	Python 3, sử dụng .venv; kiểm tra bản cụ thể bằng python --version
@@ -93,7 +93,7 @@ datasets/
     ├── train.pt
     └── test.pt
 Các tệp dữ liệu .pt phải có cấu trúc tương thích với code/TFC/dataloader.py. Nếu clone repo mà thiếu dữ liệu, cần chuẩn bị bộ SleepEEG và Epilepsy theo hướng dẫn mã nguồn TF-C gốc trước khi chạy huấn luyện.
-4. Cài đặt trên Windows (Setup)
+4. Cài đặt trên Windows 
 Bước 1 — Clone repository và mở thư mục dự án:
 git clone https://github.com/vuvandat109/TF-C-DINOv3.git
 cd TF-C-DINOv3
@@ -103,7 +103,6 @@ python -m venv .venv
 Nếu PowerShell không cho chạy script kích hoạt, thực hiện:
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 .\.venv\Scripts\Activate.ps1
-Kết quả mong đợi: Terminal có tiền tố (.venv).
 
 Bước 3 — Cài đặt thư viện:
 python -m pip install -r .\code\TFC\requirements-dinov3.txt
@@ -113,14 +112,13 @@ Bước 4 — Kiểm tra dữ liệu ở thư mục gốc:
 Test-Path .\datasets\SleepEEG\train.pt
 Test-Path .\datasets\Epilepsy\train.pt
 Test-Path .\datasets\Epilepsy\test.pt
-Kết quả mong đợi: cả ba lệnh đều trả về True.
 
 Bước 5 — Cấp quyền truy cập trọng số DINOv3:
 
-Mở DINOv3 ViT-S/16 trên Hugging Face, hoàn tất điều kiện truy cập của nhà cung cấp (nếu được yêu cầu), sau đó đăng nhập:
+Mở DINOv3 ViT-S/16 trên Hugging Face, hoàn tất điều kiện truy cập của nhà cung cấp , sau đó đăng nhập:
 hf auth login
 Không đưa token Hugging Face lên GitHub.
-5. Chạy và kiểm tra (Run & Verify)
+5. Chạy và kiểm tra 
 Các lệnh dưới đây cần chạy từ thư mục code/TFC:
 cd .\code\TFC
 5.1. Kiểm thử Loss Function
@@ -128,7 +126,7 @@ python test_dinov3_loss.py
 Kết quả kỳ vọng:
 PASS: DINOv3-TF-C loss, positive pairing and gradients in all four projected views
 Bài kiểm thử dùng tensor giả lập để kiểm tra tính hữu hạn của loss, các cặp positive và gradient của projector; không chứng minh hiệu năng mô hình pretrained.
-5.2. Kiểm thử cấu trúc hai encoder (giả lập)
+5.2. Kiểm thử cấu trúc hai encoder 
 python smoke_test_dinov3.py
 Kết quả kỳ vọng:
 PASS: both DINOv3 encoder slots replaced, adapters, output shapes and projector gradients
@@ -153,7 +151,7 @@ DINOv3-TF-C pretrain | total=... | L_time=... | L_freq=... | L_cross=...
 Pre-training Epoch : 1 | Train Loss : ...
 Trong cấu hình đã kiểm thử: 20 epoch, learning rate 3e-4, batch size 8, seed 42; cờ --subset lấy 80 mẫu SleepEEG để thử nhanh. Lưu ý: main.py hiện tự động ưu tiên CUDA khi khả dụng nên --device cpu không đảm bảo cưỡng chế CPU nếu máy có GPU CUDA.
 
-Vị trí checkpoint Pre-training (tính từ thư mục gốc repository):
+Vị trí checkpoint Pre-training 
 code/experiments_logs/SleepEEG_2_Epilepsy/run1/
 └── pre_train_seed_42_dinov3_both/
     └── saved_models/
@@ -174,7 +172,7 @@ KNN Testing: Acc=... | F1=...
 Best Testing Performance: ...
 Best KNN F1 ...
 Training is Done!
-Vị trí kết quả (theo đường dẫn trong code):
+Vị trí kết quả 
 File / thư mục	Chức năng
 code/experiments_logs/SleepEEG_2_Epilepsy/...	Log từng lần chạy
 code/experiments_logs/.../saved_models/ckp_last.pt	Checkpoint Pre-training
@@ -183,7 +181,7 @@ code/TFC/experiments_logs/finetunemodel/sleepedf2eplipsy_classifier.pt	Checkpoin
 
 
 Các giá trị MLP/KNN được in ra Terminal; phiên bản hiện tại chưa tự động lưu bảng metric đầy đủ thành CSV.
-6. Kết quả thực nghiệm (Experimental Results)
+6. Kết quả thực nghiệm 
 6.1. Kết quả kiểm thử chức năng
 Phép kiểm thử	Kết quả
 Loss Function và gradient (test_dinov3_loss.py)	PASS
@@ -207,7 +205,7 @@ Checkpoint	ckp_last.pt — đã kiểm tra tồn tại
 Loss giảm từ 3.2115 xuống 0.2784, cho thấy hàm mất mát mới đã được sử dụng trong quá trình tối ưu. Loss giảm không đồng nghĩa với Accuracy cao trên tập kiểm thử.
 6.3. Fine-tuning và Testing — 20 epoch
 Thí nghiệm dùng Epilepsy, 60 mẫu Fine-tuning và 600 mẫu Testing với --subset.
-Metric	MLP Testing (Best Testing Performance)	KNN Testing (epoch có F1 tốt nhất)
+Metric	MLP Testing 	KNN Testing 
 Accuracy	18.50%	90.33%
 Precision	9.25%	94.70%
 Recall	50.00%	73.87%
@@ -225,7 +223,7 @@ Nhận xét kết quả:
 Thuộc tính	Nội dung
 Mô hình	TF-C + hai DINOv3 ViT-S/16
 Backbone pretrained	facebook/dinov3-vits16-pretrain-lvd1689m
-Loss Function	DINOv3TFCLoss (Time, Frequency, Cross-domain NT-Xent)
+Loss Function	DINOv3TFCLoss 
 Input thử nghiệm	EEG [B, 1, 178]
 Đầu ra encoder	Hai vector 384 chiều
 Đầu ra projector	Hai vector 128 chiều
@@ -240,8 +238,8 @@ Các giới hạn cần lưu ý:
 - Hai backbone DINOv3 được đóng băng theo mặc định; projector và classifier được cập nhật.
 - Chưa thực hiện đánh giá đầy đủ trên toàn bộ dữ liệu, nhiều seed hoặc so sánh đối chứng có kiểm soát với TF-C nguyên bản.
 - Không có chức năng API dự đoán, confidence threshold và fallback dành cho người dùng cuối trong repository này.
-- Kết quả trong README không phải kết quả huấn luyện trên bộ dữ liệu cử chỉ iPhone 12.
-8. Cách sử dụng (Usage)
+
+8. Cách sử dụng 
 Dự án hiện hướng đến người nghiên cứu và lập trình viên. Sau khi cài đặt, có thể:
 1. Chạy các bài kiểm thử tại mục 5.1–5.3.
 2. Chạy đúng quy trình Pre-training → Fine-tuning → Testing tại mục 5.4–5.5.
@@ -250,7 +248,7 @@ Dự án hiện hướng đến người nghiên cứu và lập trình viên. S
 Kiểm tra checkpoint Pre-training từ code/TFC bằng PowerShell:
 Test-Path "..\experiments_logs\SleepEEG_2_Epilepsy\run1\pre_train_seed_42_dinov3_both\saved_models\ckp_last.pt"
 Kết quả kỳ vọng sau khi Pre-training: True.
-9. Xử lý lỗi thường gặp (Troubleshooting)
+9. Xử lý lỗi thường gặp 
 Hiện tượng	Nguyên nhân thường gặp	Cách xử lý
 ModuleNotFoundError: transformers	Chưa cài thư viện trong .venv	Kích hoạt .venv, cài lại requirements-dinov3.txt
 Lỗi 401 / 403 khi tải DINOv3	Chưa được cấp quyền truy cập hoặc chưa đăng nhập	Mở trang DINOv3 trên Hugging Face, chấp thuận điều kiện, chạy hf auth login
