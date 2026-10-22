@@ -25,6 +25,16 @@ parser.add_argument('--unfreeze_backbone', action='store_true', help='Fine-tune 
 parser.add_argument('--image_size', default=224, type=int)
 parser.add_argument('--n_fft', default=64, type=int)
 parser.add_argument('--subset', action='store_true', help='Use small subset for debugging')
+parser.add_argument('--dinov3_loss_time_weight', default=0.2, type=float,
+                    help='Intra-time NT-Xent weight on DINOv3 projected embeddings')
+parser.add_argument('--dinov3_loss_frequency_weight', default=0.2, type=float,
+                    help='Intra-frequency NT-Xent weight on DINOv3 projected embeddings')
+parser.add_argument('--dinov3_loss_cross_weight', default=1.0, type=float,
+                    help='Symmetric time-frequency NT-Xent weight')
+parser.add_argument('--dinov3_loss_temperature', default=0.2, type=float,
+                    help='InfoNCE temperature')
+parser.add_argument('--dinov3_finetune_ssl_weight', default=0.1, type=float,
+                    help='Weight of self-supervised objective during fine-tuning')
 
 # 1. self_supervised pre_train; 2. finetune (itself contains finetune and test)
 parser.add_argument('--training_mode', default='fine_tune_test', type=str,
@@ -62,6 +72,12 @@ logs_save_dir = args.logs_save_dir
 os.makedirs(logs_save_dir, exist_ok=True)
 exec(f'from config_files.{pretrain_dataset}_Configs import Config as Configs')
 configs = Configs()
+# Expose DINOv3-specific objective coefficients to the training loop.
+configs.dinov3_loss_time_weight = args.dinov3_loss_time_weight
+configs.dinov3_loss_frequency_weight = args.dinov3_loss_frequency_weight
+configs.dinov3_loss_cross_weight = args.dinov3_loss_cross_weight
+configs.dinov3_loss_temperature = args.dinov3_loss_temperature
+configs.dinov3_finetune_ssl_weight = args.dinov3_finetune_ssl_weight
 
 # # ##### fix random seeds for reproducibility ########
 SEED = args.seed

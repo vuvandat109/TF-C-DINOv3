@@ -103,46 +103,48 @@ def Trainer(model,  model_optimizer, classifier, classifier_optimizer, train_dl,
 
     logger.debug("\n################## Training is Done! #########################")
 
-def model_pretrain(model, model_optimizer, criterion, train_loader, config, device, training_mode,):
-    total_loss = []
+def _dinov3_loss_from_config(config):
+    """Create the DINOv3 TF-C objective on the trainable projected embeddings."""
+    return DINOv3TFCLoss(
+        temperature=getattr(config, "dinov3_loss_temperature", config.Context_Cont.temperature),
+        time_weight=getattr(config, "dinov3_loss_time_weight", 0.2),
+        frequency_weight=getattr(config, "dinov3_loss_frequency_weight", 0.2),
+        cross_weight=getattr(config, "dinov3_loss_cross_weight", 1.0),
+    )
+
+
+def model_pretrain(model, model_optimizer, criterion, train_loader, config, device, training_mode):
+    """Pretrain DINOv3 branch projectors with explicit time/frequency loss."""
     model.train()
-    global loss, loss_t, loss_f, l_TF, loss_c, data_test, data_f_test
+    objective = _dinov3_loss_from_config(config)
+    batch_losses, time_losses, freq_losses, cross_losses = [], [], [], []
 
-    # optimizer
     for batch_idx, (data, labels, aug1, data_f, aug1_f) in enumerate(train_loader):
-        model_optimizer.zero_grad()
-        data, labels = data.float().to(device), labels.long().to(device) # data: [128, 1, 178], labels: [128]
-        aug1 = aug1.float().to(device)  # aug1 = aug2 : [128, 1, 178]
-        data_f, aug1_f = data_f.float().to(device), aug1_f.float().to(device)  # aug1 = aug2 : [128, 1, 178]
+        if data.shape[0] < 2:
+            continue  # contrastive loss requires at least two samples
+        model_optimizer.zero_grad(set_to_none=True)
+        data, data_f = data.float().to(device), data_f.float().to(device)
+        aug1, aug1_f = aug1.float().to(device), aug1_f.float().to(device)
 
-        """Produce embeddings"""
+        # DINOv3 backbone features h_* may be frozen. Compute ALL loss terms
+        # on z_* so both trainable projectors receive gradients.
         h_t, z_t, h_f, z_f = model(data, data_f)
         h_t_aug, z_t_aug, h_f_aug, z_f_aug = model(aug1, aug1_f)
-
-        """Compute Pre-train loss"""
-        """NTXentLoss: normalized temperature-scaled cross entropy loss. From SimCLR"""
-        nt_xent_criterion = NTXentLoss_poly(device, data.shape[0], config.Context_Cont.temperature,
-                                       config.Context_Cont.use_cosine_similarity) # device, 128, 0.2, True
-
-        loss_t = nt_xent_criterion(h_t, h_t_aug)
-        loss_f = nt_xent_criterion(h_f, h_f_aug)
-        l_TF = nt_xent_criterion(z_t, z_f) # this is the initial version of TF loss
-
-        l_1, l_2, l_3 = nt_xent_criterion(z_t, z_f_aug), nt_xent_criterion(z_t_aug, z_f), nt_xent_criterion(z_t_aug, z_f_aug)
-        loss_c = (1 + l_TF - l_1) + (1 + l_TF - l_2) + (1 + l_TF - l_3)
-
-        lam = 0.2
-        loss = lam*(loss_t + loss_f) + l_TF
-
-        total_loss.append(loss.item())
+        loss, terms = objective(z_t, z_t_aug, z_f, z_f_aug)
         loss.backward()
         model_optimizer.step()
 
-    print('Pretraining: overall loss:{}, l_t: {}, l_f:{}, l_c:{}'.format(loss, loss_t, loss_f, l_TF))
+        batch_losses.append(loss.detach().item())
+        time_losses.append(terms["time"].item())
+        freq_losses.append(terms["frequency"].item())
+        cross_losses.append(terms["cross_time_frequency"].item())
 
-    ave_loss = torch.tensor(total_loss).mean()
-
-    return ave_loss
+    if not batch_losses:
+        raise ValueError("Pretraining requires a batch with at least two samples")
+    print("DINOv3-TF-C pretrain | total={:.4f} | L_time={:.4f} | L_freq={:.4f} | L_cross={:.4f}".format(
+        np.mean(batch_losses), np.mean(time_losses), np.mean(freq_losses), np.mean(cross_losses)
+    ))
+    return torch.tensor(batch_losses).mean()
 
 
 def model_finetune(model, model_optimizer, val_dl, config, device, training_mode, classifier=None, classifier_optimizer=None):
@@ -156,6 +158,7 @@ def model_finetune(model, model_optimizer, val_dl, config, device, training_mode
     total_prc = []
 
     criterion = nn.CrossEntropyLoss()
+    objective = _dinov3_loss_from_config(config)
     outs = np.array([])
     trgs = np.array([])
     feas = np.array([])
@@ -174,16 +177,8 @@ def model_finetune(model, model_optimizer, val_dl, config, device, training_mode
         """Produce embeddings"""
         h_t, z_t, h_f, z_f = model(data, data_f)
         h_t_aug, z_t_aug, h_f_aug, z_f_aug = model(aug1, aug1_f)
-        nt_xent_criterion = NTXentLoss_poly(device, data.shape[0], config.Context_Cont.temperature,
-                                            config.Context_Cont.use_cosine_similarity)
-        loss_t = nt_xent_criterion(h_t, h_t_aug)
-        loss_f = nt_xent_criterion(h_f, h_f_aug)
-        l_TF = nt_xent_criterion(z_t, z_f)
-
-        l_1, l_2, l_3 = nt_xent_criterion(z_t, z_f_aug), nt_xent_criterion(z_t_aug, z_f), \
-                        nt_xent_criterion(z_t_aug, z_f_aug)
-        loss_c = (1 + l_TF - l_1) + (1 + l_TF - l_2) + (1 + l_TF - l_3) #
-
+        # New DINOv3-specific contrastive objective on projected z_* features.
+        ssl_loss, ssl_parts = objective(z_t, z_t_aug, z_f, z_f_aug)
 
         """Add supervised classifier: 1) it's unique to finetuning. 2) this classifier will also be used in test."""
         fea_concat = torch.cat((z_t, z_f), dim=1)
@@ -191,8 +186,7 @@ def model_finetune(model, model_optimizer, val_dl, config, device, training_mode
         fea_concat_flat = fea_concat.reshape(fea_concat.shape[0], -1)
         loss_p = criterion(predictions, labels)
 
-        lam = 0.1
-        loss = loss_p + l_TF + lam*(loss_t + loss_f)
+        loss = loss_p + getattr(config, "dinov3_finetune_ssl_weight", 0.1) * ssl_loss
 
         acc_bs = labels.eq(predictions.detach().argmax(dim=1)).float().mean()
         onehot_label = F.one_hot(labels)

@@ -191,3 +191,7 @@ class hierarchical_contrastive_loss(torch.nn.Module):
                 loss += alpha * self.instance_contrastive_loss(z1, z2)
             d += 1
         return loss / d
+
+# Updated DINOv3-TF-C training objective. The old NT-Xent implementations
+# above remain for historical comparison, but trainer.py now uses this class.
+from dinov3_loss import DINOv3TFCLoss
