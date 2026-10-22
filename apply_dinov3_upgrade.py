@@ -150,56 +150,8 @@ def patch_readme(content):
         return content
     block = '''# THAY ĐỔI DINOv3 + LOSS — HƯỚNG DẪN KIỂM TRA CÂU 1
 
-**Đường dẫn code để thầy kiểm tra trực tiếp:**
 
-- [Hai DINOv3 pretrained độc lập: `model.py`](code/TFC/model.py)
-- [Chuyển chuỗi tín hiệu thành ảnh: `dinov3_adapter.py`](code/TFC/dinov3_adapter.py)
-- [Loss mới: `dinov3_loss.py`](code/TFC/dinov3_loss.py)
-- [Hàm `loss.py` trỏ tới loss mới](code/TFC/loss.py)
-- [Pre-training/Fine-tuning gọi loss mới: `trainer.py`](code/TFC/trainer.py)
-- [Các trọng số cấu hình loss: `main.py`](code/TFC/main.py)
-- [Bài kiểm thử loss/gradient: `test_dinov3_loss.py`](code/TFC/test_dinov3_loss.py)
 
-## Cập nhật hàm loss cho hai DINOv3
-
-Mã nguồn gốc có `NTXentLoss_poly` tính `L_t`, `L_f` trên đặc trưng backbone
-`h_t`, `h_f`, trong khi hai backbone DINOv3 có thể bị đóng băng. Phiên bản
-này chuyển loss sang **đầu ra projector** `z_t`, `z_f` để các thành phần loss
-đều có gradient đối với tham số được huấn luyện. Hàm loss mới là
-`DINOv3TFCLoss` được viết tại `code/TFC/dinov3_loss.py` và dùng thực tế
-trong `model_pretrain()` và `model_finetune()`.
-
-Ký hiệu `t`, `f` cho miền thời gian và tần số; dấu `'` chỉ mẫu tăng cường.
-`NTXent(a,b)` là InfoNCE đối xứng có positive cùng chỉ số mẫu:
-
-```
-L_time  = NTXent(z_t, z_t')
-L_freq  = NTXent(z_f, z_f')
-L_cross = 1/4 * ( NTXent(z_t, z_f) + NTXent(z_t, z_f')
-                + NTXent(z_t', z_f) + NTXent(z_t', z_f') )
-L_pretrain = 0.2*L_time + 0.2*L_freq + 1.0*L_cross
-L_finetune = CrossEntropy(classifier([z_t;z_f]), y) + 0.1*L_pretrain
-```
-
-Các hệ số và nhiệt độ có thể chỉnh bằng các tham số `--dinov3_loss_*`
-trong `code/TFC/main.py`. Đây là **biến thể loss cho DINOv3-TF-C**,
-không được trình bày như nguyên bản của bài báo TF-C. Mặc định backbone
-DINOv3 được đóng băng; projector và classifier được huấn luyện.
-
-**Kiểm thử trên CPU, không cần tải DINOv3:**
-
-```bash
-cd code/TFC
-python test_dinov3_loss.py
-python smoke_test_dinov3.py
-```
-
-Bài kiểm thử xác minh loss hữu hạn, positive alignment, và gradient của
-bốn vector projector. Kiểm thử đơn vị không thay thế việc huấn luyện thực tế.
-Các kết quả accuracy/epoch được báo cáo trước đây **không phải** kết quả
-đo lại sau khi cập nhật loss; muốn báo cáo số mới phải huấn luyện lại.
-
----
 
 '''
     return block + content
