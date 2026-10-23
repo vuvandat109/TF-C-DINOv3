@@ -1,272 +1,659 @@
-TF-C + DINOv3 — Học biểu diễn chuỗi thời gian bằng tương phản thời gian–tần số
-Trạng thái: Đã chạy thử hai encoder DINOv3 pretrained thực tế; hoàn thành 20 epoch Pre-training, 20 epoch Fine-tuning và Testing trên tập con SleepEEG → Epilepsy.
-Phạm vi: Dự án nghiên cứu AI chạy cục bộ bằng Python. Repository này chưa triển khai website, ứng dụng người dùng hoặc REST API.
+**# TF-C + DINOv3 — Time Series Representation Learning through Time–Frequency Contrastive Learning**
 
-1. Tổng quan dự án
-Dự án thử nghiệm thay thế hai Transformer Encoder trong mô hình TF-C (Time-Frequency Consistency) bằng hai backbone DINOv3 ViT-S/16 pretrained độc lập, một backbone xử lý miền thời gian và một backbone xử lý miền tần số.
+**\*\*Status according to the experimental report:\*\*** Tested two actual pretrained DINOv3 encoders; completed 20 epochs of Pre-training, 20 epochs of Fine-tuning, and Testing on the SleepEEG → Epilepsy subset.
 
-Vì DINOv3 được thiết kế để nhận ảnh, tín hiệu EEG một chiều được biến đổi thành ảnh đặc trưng trước khi đưa vào encoder. Các đặc trưng được kết hợp để thực hiện bài toán phân loại Epilepsy.
+**## 1. Project Overview**
 
-Mục tiêu:
-- Thay hai encoder TF-C bằng hai DINOv3 pretrained độc lập.
-- Chuyển tín hiệu EEG thành ảnh thời gian và ảnh phổ tần số.
-- Cài đặt và sử dụng Loss Function mới trong Pre-training và Fine-tuning.
-- Kiểm thử cấu trúc mô hình, gradient, huấn luyện và đánh giá trên tập dữ liệu thật.
-Các file chính để kiểm tra thay đổi:
-Thành phần	File mã nguồn
-Hai DINOv3 encoder, projector và classifier	[`code/TFC/model.py`](code/TFC/model.py)
-Chuyển tín hiệu thành ảnh	[`code/TFC/dinov3_adapter.py`](code/TFC/dinov3_adapter.py)
-Loss Function mới	[`code/TFC/dinov3_loss.py`](code/TFC/dinov3_loss.py)
-Module liên kết Loss	[`code/TFC/loss.py`](code/TFC/loss.py)
-Sử dụng Loss khi Pre-training/Fine-tuning	[`code/TFC/trainer.py`](code/TFC/trainer.py)
-Tham số cấu hình và chương trình chính	[`code/TFC/main.py`](code/TFC/main.py)
-Kiểm thử Loss và gradient	[`code/TFC/test_dinov3_loss.py`](code/TFC/test_dinov3_loss.py)
-Kiểm thử encoder với backbone giả lập	[`code/TFC/smoke_test_dinov3.py`](code/TFC/smoke_test_dinov3.py)
-Kiểm thử hai encoder pretrained thật	[`code/TFC/test_two_real_dinov3.py`](code/TFC/test_two_real_dinov3.py)
+The project experiments with replacing the two Transformer Encoders in TF-C (Time-Frequency Consistency) with two independent pretrained DINOv3 ViT-S/16 backbones:
 
+\- One backbone processes the time domain.
 
-2. Kiến trúc hệ thống 
-                 EEG: [B, 1, 178]
-                        |
-               SignalImageAdapter
-                 /            \
-                v              v
-         Ảnh thời gian     Ảnh phổ STFT
-           [B,3,224,224]   [B,3,224,224]
-                |              |
-         DINOv3 Encoder T  DINOv3 Encoder F
-                |              |
-          384 đặc trưng   384 đặc trưng
-                |              |
-           Projector T     Projector F
-                |              |
-          z_t: 128 chiều  z_f: 128 chiều
-                 \            /
-                  \          /
-          DINOv3TFCLoss (Pre-training)
-                        |
-               Ghép z_t và z_f
-                    256 chiều
-                        |
-                  MLP hoặc KNN
-                        |
-                Nhãn Epilepsy
-- Input: tensor EEG kích thước [B, 1, 178]; B là số mẫu trong batch.
-- Ảnh đầu vào encoder: mỗi ảnh có 3 kênh và kích thước 224 × 224.
-- Encoder: mỗi DINOv3 ViT-S/16 xuất vector 384 chiều; hai mô hình được khởi tạo độc lập.
-- Projector: mỗi nhánh ánh xạ từ 384 xuống 128 chiều.
-- Bộ phân loại: nhận vector ghép 256 chiều, sử dụng MLP hoặc KNN trong thí nghiệm đánh giá.
-- Môi trường: Python chạy local, không có web frontend, backend hoặc cơ sở dữ liệu trong repository thử nghiệm này.
-2.1. Hàm mất mát mới (DINOv3TFCLoss)
-Hàm loss sử dụng đầu ra projector có thể huấn luyện (z_t, z_f) thay vì chỉ tối ưu trên đặc trưng backbone đóng băng. Ký hiệu _aug là mẫu đã tăng cường dữ liệu.
-L_time  = NT-Xent(z_t, z_t_aug)
-L_freq  = NT-Xent(z_f, z_f_aug)
+\- One backbone processes the frequency domain.
+
+Since DINOv3 is designed to receive images, one-dimensional EEG signals are converted into feature images before being passed to the encoders. The features are combined to perform Epilepsy classification.
+
+**### Objectives**
+
+\- Replace the two TF-C encoders with two independent pretrained DINOv3 encoders.
+
+\- Convert EEG signals into time-domain images and frequency spectrum images.
+
+\- Implement and use the new Loss Function in Pre-training and Fine-tuning.
+
+\- Test the model structure, gradients, training, and evaluation on real data.
+
+**### Main Files**
+
+\| Component | Source Code File |
+
+\| --- | --- |
+
+\| Two DINOv3 encoders, projectors, and classifier | [\`code/TFC/model.py\`]\(code/TFC/model.py) |
+
+\| Signal-to-image conversion | [\`code/TFC/dinov3_adapter.py\`]\(code/TFC/dinov3_adapter.py) |
+
+\| New Loss Function | [\`code/TFC/dinov3_loss.py\`]\(code/TFC/dinov3_loss.py) |
+
+\| Loss integration module | [\`code/TFC/loss.py\`]\(code/TFC/loss.py) |
+
+\| Loss usage during Pre-training/Fine-tuning | [\`code/TFC/trainer.py\`]\(code/TFC/trainer.py) |
+
+\| Configuration parameters and main program | [\`code/TFC/main.py\`]\(code/TFC/main.py) |
+
+\| Loss and gradient testing | [\`code/TFC/test_dinov3_loss.py\`]\(code/TFC/test_dinov3_loss.py) |
+
+\| Encoder testing with a mock backbone | [\`code/TFC/smoke_test_dinov3.py\`]\(code/TFC/smoke_test_dinov3.py) |
+
+\| Testing two actual pretrained encoders | [\`code/TFC/test_two_real_dinov3.py\`]\(code/TFC/test_two_real_dinov3.py) |
+
+**## 2. System Architecture**
+
+\| Stage | Time Branch | Frequency Branch |
+
+\| --- | --- | --- |
+
+\| Input | EEG signal \`[B, 1, 178]\` | EEG signal \`[B, 1, 178]\` |
+
+\| Conversion using SignalImageAdapter | Time-domain image \`[B, 3, 224, 224]\` | STFT spectrum image \`[B, 3, 224, 224]\` |
+
+\| Backbone | DINOv3 Encoder T | DINOv3 Encoder F |
+
+\| Backbone features | 384 dimensions | 384 dimensions |
+
+\| Projector | Projector T | Projector F |
+
+\| Features after the projector | \`z_t\`: 128 dimensions | \`z_f\`: 128 dimensions |
+
+**### Architecture Details**
+
+\- **\*\*Input:\*\*** EEG tensor of shape \`[B, 1, 178]\`; \`B\` is the number of samples in the batch.
+
+\- **\*\*Encoder input images:\*\*** Each image has 3 channels and a size of \`224 × 224\`.
+
+\- **\*\*Encoder:\*\*** Each DINOv3 ViT-S/16 outputs a 384-dimensional vector; the two encoders are separate instances and do not share parameters.
+
+\- **\*\*Projector:\*\*** Each branch maps from 384 to 128 dimensions.
+
+\- **\*\*Classifier:\*\*** Receives a concatenated 256-dimensional vector, using MLP or KNN in the evaluation experiment.
+
+\- **\*\*Environment:\*\*** Python running locally.
+
+**### 2.1. New Loss Function — DINOv3TFCLoss**
+
+The loss function uses the outputs of the trainable projectors (\`z_t\`, \`z_f\`). The notation \`\_aug\` denotes the representation of a data-augmented sample.
+
+\`\`\`text
+
+L_time = NT-Xent(z_t, z_t_aug)
+
+L_freq = NT-Xent(z_f, z_f_aug)
+
 L_cross = mean(
-    NT-Xent(z_t,     z_f),
-    NT-Xent(z_t,     z_f_aug),
+
+    NT-Xent(z_t, z_f),
+
+    NT-Xent(z_t, z_f_aug),
+
     NT-Xent(z_t_aug, z_f),
+
     NT-Xent(z_t_aug, z_f_aug)
+
 )
 
-L_pretrain = 0.2 * L_time + 0.2 * L_freq + 1.0 * L_cross
-L_finetune = CrossEntropy + 0.1 * L_pretrain
+L_pretrain = 0.2 \* L_time + 0.2 \* L_freq + 1.0 \* L_cross
+
+L_finetune = CrossEntropy + 0.1 \* L_pretrain
+
 Temperature = 0.2
 
-3. Môi trường 
-Thành phần	Yêu cầu / thông tin
-Hệ điều hành đã chạy	Windows, PowerShell trong VS Code
-Python	Python 3, sử dụng .venv; kiểm tra bản cụ thể bằng python --version
-PyTorch	torch>=2.2
-Transformers	transformers>=4.56.0
-Hugging Face Hub	huggingface_hub>=0.34
-NumPy	numpy>=1.24
-scikit-learn	scikit-learn>=1.3
-Backbone	facebook/dinov3-vits16-pretrain-lvd1689m
-Thiết bị đã thử nghiệm	CPU; tốc độ tùy cấu hình máy
+\`\`\`
 
+**## 3. Environment and Data**
 
-Dữ liệu cần có trước khi chạy:
+**### 3.1. Environment**
+
+\| Component | Requirements / Information |
+
+\| --- | --- |
+
+\| Operating system used | Windows, PowerShell in VS Code |
+
+\| Python | Python 3, using \`.venv\`; check the version with \`python --version\` |
+
+\| PyTorch | \`torch>=2.2\` |
+
+\| Transformers | \`transformers>=4.56.0\` |
+
+\| Hugging Face Hub | \`huggingface_hub>=0.34\` |
+
+\| NumPy | \`numpy>=1.24\` |
+
+\| scikit-learn | \`scikit-learn>=1.3\` |
+
+\| Backbone | \`facebook/dinov3-vits16-pretrain-lvd1689m\` |
+
+\| Tested device | CPU; speed depends on the machine configuration |
+
+**### 3.2. Required Data**
+
+Prepare the following files relative to the repository root directory:
+
+\`\`\`text
+
 datasets/
-├── SleepEEG/
-│   └── train.pt
-└── Epilepsy/
-    ├── train.pt
-    └── test.pt
-Các tệp dữ liệu .pt phải có cấu trúc tương thích với code/TFC/dataloader.py. Nếu clone repo mà thiếu dữ liệu, cần chuẩn bị bộ SleepEEG và Epilepsy theo hướng dẫn mã nguồn TF-C gốc trước khi chạy huấn luyện.
-4. Cài đặt trên Windows 
-Bước 1 — Clone repository và mở thư mục dự án:
-git clone https://github.com/vuvandat109/TF-C-DINOv3.git
-cd TF-C-DINOv3
-Bước 2 — Tạo và kích hoạt môi trường ảo:
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-Nếu PowerShell không cho chạy script kích hoạt, thực hiện:
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
-.\.venv\Scripts\Activate.ps1
 
-Bước 3 — Cài đặt thư viện:
+├── SleepEEG/
+
+│   └── train.pt
+
+└── Epilepsy/
+
+    ├── train.pt
+
+    └── test.pt
+
+\`\`\`
+
+The \`.pt\` files must have a structure compatible with [\`code/TFC/dataloader.py\`]\(code/TFC/dataloader.py).
+
+**## 4. Installation on Windows**
+
+**### Step 1 — Clone the Repository and Open the Project Directory**
+
+\`\`\`powershell
+
+git clone https\://github.com/vuvandat109/TF-C-DINOv3.git
+
+cd TF-C-DINOv3
+
+\`\`\`
+
+The commands in Section 4 are run from the \`TF-C-DINOv3\` root directory.
+
+**### Step 2 — Create and Activate the Virtual Environment**
+
+\`\`\`powershell
+
+python -m venv .venv
+
+.\\.venv\Scripts\Activate.ps1
+
+\`\`\`
+
+If PowerShell does not allow the activation script to run, execute:
+
+\`\`\`powershell
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+
+.\\.venv\Scripts\Activate.ps1
+
+\`\`\`
+
+**### Step 3 — Install Libraries**
+
+\`\`\`powershell
+
 python -m pip install -r .\code\TFC\requirements-dinov3.txt
+
+\`\`\`
+
+Check versions:
+
+\`\`\`powershell
+
 python --version
-python -c "import torch, transformers; print('PyTorch:', torch.__version__); print('Transformers:', transformers.__version__)"
-Bước 4 — Kiểm tra dữ liệu ở thư mục gốc:
+
+python -c "import torch, transformers; print('PyTorch:', torch.\_\_version\_\_); print('Transformers:', transformers.\_\_version\_\_)"
+
+\`\`\`
+
+**### Step 4 — Check the Data**
+
+Run from the repository root directory:
+
+\`\`\`powershell
+
 Test-Path .\datasets\SleepEEG\train.pt
+
 Test-Path .\datasets\Epilepsy\train.pt
+
 Test-Path .\datasets\Epilepsy\test.pt
 
-Bước 5 — Cấp quyền truy cập trọng số DINOv3:
+\`\`\`
 
-Mở DINOv3 ViT-S/16 trên Hugging Face, hoàn tất điều kiện truy cập của nhà cung cấp , sau đó đăng nhập:
+All three commands should return:
+
+\`\`\`text
+
+True
+
+\`\`\`
+
+If any result is \`False\`, check the location and names of the data files before continuing.
+
+**### Step 5 — Obtain Access to DINOv3 Weights**
+
+Open the model page:
+
+[facebook/dinov3-vits16-pretrain-lvd1689m on Hugging Face]\(https\://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m)
+
+Complete the provider's access requirements and ensure that the account has permission to download the weights.
+
+Then log in using the corresponding account:
+
+\`\`\`powershell
+
 hf auth login
-Không đưa token Hugging Face lên GitHub.
-5. Chạy và kiểm tra 
-Các lệnh dưới đây cần chạy từ thư mục code/TFC:
+
+\`\`\`
+
+**## 5. Running and Testing**
+
+The Python commands in this section must be run from the \`code/TFC\` directory.
+
+From the repository root directory, execute:
+
+\`\`\`powershell
+
 cd .\code\TFC
-5.1. Kiểm thử Loss Function
+
+\`\`\`
+
+**### 5.1. Test the Loss Function**
+
+\`\`\`powershell
+
 python test_dinov3_loss.py
-Kết quả kỳ vọng:
+
+\`\`\`
+
+Expected result:
+
+\`\`\`text
+
 PASS: DINOv3-TF-C loss, positive pairing and gradients in all four projected views
-Bài kiểm thử dùng tensor giả lập để kiểm tra tính hữu hạn của loss, các cặp positive và gradient của projector; không chứng minh hiệu năng mô hình pretrained.
-5.2. Kiểm thử cấu trúc hai encoder 
+
+\`\`\`
+
+The test uses mock tensors to check loss finiteness, positive pairs, and projector gradients. This test does not demonstrate the performance of the pretrained model.
+
+**### 5.2. Test the Two-Encoder Structure**
+
+\`\`\`powershell
+
 python smoke_test_dinov3.py
-Kết quả kỳ vọng:
+
+\`\`\`
+
+Expected result:
+
+\`\`\`text
+
 PASS: both DINOv3 encoder slots replaced, adapters, output shapes and projector gradients
-5.3. Kiểm thử hai encoder DINOv3 pretrained thật
+
+\`\`\`
+
+**### 5.3. Test Two Actual Pretrained DINOv3 Encoders**
+
+\`\`\`powershell
+
 python test_two_real_dinov3.py
-Kết quả đã ghi nhận:
+
+\`\`\`
+
+Results recorded in the report:
+
+\`\`\`text
+
 EEG input: torch.Size([2, 1, 178])
+
 Independent encoders: True
+
 Time features: torch.Size([2, 384])
+
 Time projector: torch.Size([2, 128])
+
 Frequency features: torch.Size([2, 384])
+
 Frequency projector: torch.Size([2, 128])
+
 Combined: torch.Size([2, 256])
+
 Finite: True
+
 SUCCESS: Both real DINOv3 encoders passed!
-5.4. Pre-training với Loss Function mới
+
+\`\`\`
+
+**### 5.4. Pre-training with the New Loss Function**
+
+\`\`\`powershell
+
 python main.py --training_mode pre_train --pretrain_dataset SleepEEG --target_dataset Epilepsy --device cpu --subset
-Dấu hiệu chạy đúng:
+
+\`\`\`
+
+Signs of correct execution:
+
+\`\`\`text
+
 Mode: pre_train
+
 Pretraining on source dataset
+
 DINOv3-TF-C pretrain | total=... | L_time=... | L_freq=... | L_cross=...
+
 Pre-training Epoch : 1 | Train Loss : ...
-Trong cấu hình đã kiểm thử: 20 epoch, learning rate 3e-4, batch size 8, seed 42; cờ --subset lấy 80 mẫu SleepEEG để thử nhanh. Lưu ý: main.py hiện tự động ưu tiên CUDA khi khả dụng nên --device cpu không đảm bảo cưỡng chế CPU nếu máy có GPU CUDA.
 
-Vị trí checkpoint Pre-training 
-code/experiments_logs/SleepEEG_2_Epilepsy/run1/
-└── pre_train_seed_42_dinov3_both/
-    └── saved_models/
-        └── ckp_last.pt
-5.5. Fine-tuning và Testing
-Chỉ chạy sau khi Pre-training đã lưu checkpoint mới.
+\`\`\`
+
+Reported configuration:
+
+\| Parameter | Value |
+
+\| --- | --- |
+
+\| Number of epochs | 20 |
+
+\| Learning rate | \`3e-4\` |
+
+\| Batch size | 8 |
+
+\| Seed | 42 |
+
+\| Quick-test data | 80 SleepEEG samples when using \`--subset\` |
+
+**\*\*Note:\*\*** According to the current source code description, \`main.py\` automatically prioritizes CUDA when available. Therefore, \`--device cpu\` does not guarantee CPU execution if the machine has a CUDA GPU.
+
+**#### Pre-training Checkpoint Location**
+
+Path relative to the repository root directory:
+
+\`\`\`text
+
+code/experiments_logs/SleepEEG_2_Epilepsy/run1/pre_train_seed_42_dinov3_both/saved_models/ckp_last.pt
+
+\`\`\`
+
+**### 5.5. Fine-tuning and Testing**
+
+Run only after Pre-training has saved a new checkpoint.
+
+\`\`\`powershell
+
 python main.py --training_mode fine_tune_test --pretrain_dataset SleepEEG --target_dataset Epilepsy --device cpu --subset
-Cấu hình --subset đã kiểm thử dùng 60 mẫu Fine-tuning và 600 mẫu Testing.
 
-Dấu hiệu chạy đúng:
+\`\`\`
+
+The reported \`--subset\` configuration uses:
+
+\- 60 Fine-tuning samples.
+
+\- 600 Testing samples.
+
+Signs of correct execution:
+
+\`\`\`text
+
 Mode: fine_tune_test
+
 Fine-tune on Fine-tuning set
+
 Epoch : 1
+
 Finetune: loss = ... | Acc=... | F1=...
+
 MLP Testing: Acc=... | F1=...
+
 KNN Testing: Acc=... | F1=...
+
 ...
+
 Best Testing Performance: ...
+
 Best KNN F1 ...
+
 Training is Done!
-Vị trí kết quả 
-File / thư mục	Chức năng
-code/experiments_logs/SleepEEG_2_Epilepsy/...	Log từng lần chạy
-code/experiments_logs/.../saved_models/ckp_last.pt	Checkpoint Pre-training
-code/TFC/experiments_logs/finetunemodel/sleepedf2eplipsy_model.pt	Checkpoint Fine-tuning
-code/TFC/experiments_logs/finetunemodel/sleepedf2eplipsy_classifier.pt	Checkpoint classifier MLP
 
+\`\`\`
 
-Các giá trị MLP/KNN được in ra Terminal; phiên bản hiện tại chưa tự động lưu bảng metric đầy đủ thành CSV.
-6. Kết quả thực nghiệm 
-6.1. Kết quả kiểm thử chức năng
-Phép kiểm thử	Kết quả
-Loss Function và gradient (test_dinov3_loss.py)	PASS
-Kiến trúc encoder giả lập (smoke_test_dinov3.py)	PASS
-Hai encoder DINOv3 pretrained thật (test_two_real_dinov3.py)	SUCCESS
+**### 5.6. Result Locations**
 
+The following paths are relative to the repository root directory:
 
-6.2. Pre-training — 20 epoch
-Chỉ số	Giá trị
-Bộ dữ liệu	SleepEEG (--subset: 80 mẫu)
-Epoch hoàn thành	20/20
-Loss epoch 1	3.2115
-Loss epoch 20	0.2784
-L_time epoch 20	0.1390
-L_freq epoch 20	0.1775
-L_cross epoch 20	0.2151
-Thời gian chạy	00:23:57.778917
-Checkpoint	ckp_last.pt — đã kiểm tra tồn tại
+\| File / Directory | Purpose |
 
+\| --- | --- |
 
-Loss giảm từ 3.2115 xuống 0.2784, cho thấy hàm mất mát mới đã được sử dụng trong quá trình tối ưu. Loss giảm không đồng nghĩa với Accuracy cao trên tập kiểm thử.
-6.3. Fine-tuning và Testing — 20 epoch
-Thí nghiệm dùng Epilepsy, 60 mẫu Fine-tuning và 600 mẫu Testing với --subset.
-Metric	MLP Testing 	KNN Testing 
-Accuracy	18.50%	90.33%
-Precision	9.25%	94.70%
-Recall	50.00%	73.87%
-F1-score	15.61%	79.52%
-AUROC	67.83%	91.21%
-AUPRC	72.78%	89.79%
+\| \`code/experiments_logs/SleepEEG_2_Epilepsy/\` | Experiment log directory |
 
+\| \`code/experiments_logs/SleepEEG_2_Epilepsy/run1/pre_train_seed_42_dinov3_both/saved_models/ckp_last.pt\` | Pre-training checkpoint |
 
-Nhận xét kết quả:
-- KNN đạt Accuracy cao trong lần chạy thử, nhưng kết quả trên tập con không đủ để kết luận mô hình tổng quát hóa tốt.
-- MLP đạt Accuracy thấp và gần như không cải thiện từ epoch 2 đến epoch 20. Cần kiểm tra lại quá trình Fine-tuning, phân bố nhãn và logic tải checkpoint trước khi đánh giá cuối cùng.
-- Log xuất hiện UndefinedMetricWarning vì có lớp không được dự đoán. Đây là giới hạn thực tế cần ghi nhận, không nên bỏ qua.
-- Không thể khẳng định biến thể DINOv3 vượt TF-C gốc nếu chưa đánh giá đối chứng cùng tập dữ liệu và cùng điều kiện.
-7. Mô hình AI và giới hạn (AI Model)
-Thuộc tính	Nội dung
-Mô hình	TF-C + hai DINOv3 ViT-S/16
-Backbone pretrained	facebook/dinov3-vits16-pretrain-lvd1689m
-Loss Function	DINOv3TFCLoss 
-Input thử nghiệm	EEG [B, 1, 178]
-Đầu ra encoder	Hai vector 384 chiều
-Đầu ra projector	Hai vector 128 chiều
-Đầu ra phân loại	Logits hai lớp Epilepsy
-Cấu hình thực nghiệm	seed 42, --subset, 20 epoch
-Triển khai	Chạy local bằng Python; chưa có REST API hoặc website
+\| \`code/TFC/experiments_logs/finetunemodel/sleepedf2eplipsy_model.pt\` | Fine-tuning checkpoint |
 
+\| \`code/TFC/experiments_logs/finetunemodel/sleepedf2eplipsy_classifier.pt\` | MLP classifier checkpoint |
 
-Các giới hạn cần lưu ý:
-- DINOv3 được pretrained trên ảnh. Biến đổi EEG thành ảnh là phương pháp thử nghiệm, chưa chứng minh là tối ưu.
-- dataloader.py hiện lấy kênh tín hiệu đầu tiên trong thí nghiệm này.
-- Hai backbone DINOv3 được đóng băng theo mặc định; projector và classifier được cập nhật.
-- Chưa thực hiện đánh giá đầy đủ trên toàn bộ dữ liệu, nhiều seed hoặc so sánh đối chứng có kiểm soát với TF-C nguyên bản.
-- Không có chức năng API dự đoán, confidence threshold và fallback dành cho người dùng cuối trong repository này.
+**## 6. Experimental Results**
 
-8. Cách sử dụng 
-Dự án hiện hướng đến người nghiên cứu và lập trình viên. Sau khi cài đặt, có thể:
-1. Chạy các bài kiểm thử tại mục 5.1–5.3.
-2. Chạy đúng quy trình Pre-training → Fine-tuning → Testing tại mục 5.4–5.5.
-3. Đọc log, theo dõi Loss, Accuracy, Precision, Recall, F1, AUROC và AUPRC trên Terminal.
-4. Sử dụng checkpoint cho thí nghiệm tiếp theo với cùng kiến trúc và cấu hình tương thích.
-Kiểm tra checkpoint Pre-training từ code/TFC bằng PowerShell:
+The following figures were recorded from the report of a trial run on a subset; they are not results from running on the full dataset.
+
+**### 6.1. Functional Test Results**
+
+\| Test | Reported Result |
+
+\| --- | --- |
+
+\| Loss Function and gradients — \`test_dinov3_loss.py\` | PASS |
+
+\| Mock encoder architecture — \`smoke_test_dinov3.py\` | PASS |
+
+\| Two actual pretrained DINOv3 encoders — \`test_two_real_dinov3.py\` | SUCCESS |
+
+**### 6.2. Pre-training — 20 Epochs**
+
+\| Metric | Value |
+
+\| --- | --- |
+
+\| Dataset | SleepEEG, \`--subset\`: 80 samples |
+
+\| Completed epochs | 20/20 |
+
+\| Epoch 1 loss | 3.2115 |
+
+\| Epoch 20 loss | 0.2784 |
+
+\| Epoch 20 \`L_time\` | 0.1390 |
+
+\| Epoch 20 \`L_freq\` | 0.1775 |
+
+\| Epoch 20 \`L_cross\` | 0.2151 |
+
+\| Runtime | \`00:23:57.778917\` |
+
+\| Checkpoint | \`ckp_last.pt\` — reported as verified to exist |
+
+Loss decreased from **\*\*3.2115\*\*** to **\*\*0.2784\*\*** in the reported run.
+
+**### 6.3. Fine-tuning and Testing — 20 Epochs**
+
+The experiment uses Epilepsy with 60 Fine-tuning samples and 600 Testing samples when \`--subset\` is enabled.
+
+\| Metric | MLP Testing | KNN Testing |
+
+\| --- | --- | --- |
+
+\| Accuracy | 18.50% | 90.33% |
+
+\| Precision | 9.25% | 94.70% |
+
+\| Recall | 50.00% | 73.87% |
+
+\| F1-score | 15.61% | 79.52% |
+
+\| AUROC | 67.83% | 91.21% |
+
+\| AUPRC | 72.78% | 89.79% |
+
+**### Discussion of Results**
+
+\- KNN achieved high Accuracy in the trial run, but results on a subset are insufficient to conclude that the model generalizes well.
+
+\- MLP achieved low Accuracy and showed almost no improvement from epoch 2 to epoch 20. The Fine-tuning process, label distribution, and checkpoint loading logic need to be checked before the final evaluation.
+
+\- The logs contain \`UndefinedMetricWarning\` because a class was not predicted. The predictions and metric calculations need to be examined in detail.
+
+\- The DINOv3 variant cannot yet be claimed to outperform the original TF-C without a controlled comparison using the same dataset and conditions.
+
+**## 7. AI Model and Limitations**
+
+**### 7.1. Model Information**
+
+\| Attribute | Description |
+
+\| --- | --- |
+
+\| Model | TF-C + two DINOv3 ViT-S/16 encoders |
+
+\| Pretrained backbone | \`facebook/dinov3-vits16-pretrain-lvd1689m\` |
+
+\| Loss Function | \`DINOv3TFCLoss\` |
+
+\| Experimental input | EEG \`[B, 1, 178]\` |
+
+\| Encoder outputs | Two 384-dimensional vectors |
+
+\| Projector outputs | Two 128-dimensional vectors |
+
+\| Classifier input | Concatenated 256-dimensional vector |
+
+\| MLP classifier output | Two-class logits in the described Epilepsy configuration |
+
+\| Experimental configuration | Seed 42, \`--subset\`, 20 epochs |
+
+\| Deployment | Runs locally using Python |
+
+**### 7.2. Limitations**
+
+\- DINOv3 is pretrained on images. Converting EEG into images is an experimental method that has not been demonstrated to be optimal.
+
+\- According to the experiment description, \`dataloader.py\` takes the first signal channel.
+
+\- The two DINOv3 backbones are frozen by default; the subsequent trainable layers are optimized at each stage.
+
+\- Full evaluation on the entire dataset, across multiple seeds, or through a controlled comparison with the original TF-C has not yet been performed.
+
+\- The experimental repository does not yet provide a prediction API, confidence threshold, or fallback for end users.
+
+**## 8. Usage**
+
+The project is intended for researchers and developers.
+
+After installation:
+
+1\. Run the tests in Sections 5.1–5.3.
+
+2\. Run **\*\*Pre-training → Fine-tuning → Testing\*\*** in the order described in Sections 5.4–5.5.
+
+3\. Read the logs and monitor Loss, Accuracy, Precision, Recall, F1, AUROC, and AUPRC in the Terminal.
+
+4\. Use the checkpoint for subsequent experiments with the same architecture and a compatible configuration.
+
+**### Check the Pre-training Checkpoint**
+
+From the \`code/TFC\` directory, run:
+
+\`\`\`powershell
+
 Test-Path "..\experiments_logs\SleepEEG_2_Epilepsy\run1\pre_train_seed_42_dinov3_both\saved_models\ckp_last.pt"
-Kết quả kỳ vọng sau khi Pre-training: True.
-9. Xử lý lỗi thường gặp 
-Hiện tượng	Nguyên nhân thường gặp	Cách xử lý
-ModuleNotFoundError: transformers	Chưa cài thư viện trong .venv	Kích hoạt .venv, cài lại requirements-dinov3.txt
-Lỗi 401 / 403 khi tải DINOv3	Chưa được cấp quyền truy cập hoặc chưa đăng nhập	Mở trang DINOv3 trên Hugging Face, chấp thuận điều kiện, chạy hf auth login
-FileNotFoundError: train.pt	Thiếu dữ liệu hoặc chạy sai thư mục	Kiểm tra ba tệp .pt; chạy main.py từ code/TFC
-Không tìm thấy ckp_last.pt	Chưa Pre-training hoặc tên thư mục thí nghiệm không khớp	Chạy Pre-training trước, giữ nguyên dataset/seed/run description
-Epoch chạy lâu	DINOv3 và STFT sử dụng CPU/RAM đáng kể	Theo dõi Task Manager; dùng --subset để thử; cân nhắc GPU nếu có
-UndefinedMetricWarning	Có nhãn không được classifier dự đoán	Kiểm tra dự đoán, phân bố nhãn và confusion matrix
-MLP Accuracy thấp và không cải thiện	Mô hình chưa hội tụ hoặc luồng huấn luyện/đánh giá có vấn đề	Kiểm tra trainer.py, checkpoint và optimizer; chưa kết luận MLP tốt
-can't open file ...main.py	Terminal đang ở sai thư mục	Chạy cd code\TFC từ thư mục gốc trước khi gọi python main.py
 
+\`\`\`
 
-10. Tái lập thí nghiệm và tài liệu tham khảo
-Để người khác tái lập, cần giữ đúng mã nguồn, phiên bản dữ liệu và chia tập, cấu hình, trọng số pretrained, seed và môi trường. Cấu hình đã chạy: seed 42, learning rate 3e-4, batch size Pre-training 8, số epoch 20, Loss weights 0.2 / 0.2 / 1.0, hệ số SSL khi Fine-tuning 0.1.
+Expected result after Pre-training has successfully saved the checkpoint:
 
-Để ghi lại phiên bản thư viện của máy:
+\`\`\`text
+
+True
+
+\`\`\`
+
+**## 9. Troubleshooting**
+
+\| Symptom | Common Cause | Solution |
+
+\| --- | --- | --- |
+
+\| \`ModuleNotFoundError: transformers\` | Libraries have not been installed in the correct Python environment | Activate \`.venv\` and reinstall \`requirements-dinov3.txt\` |
+
+\| \`401\` / \`403\` errors when downloading DINOv3 | Access has not been granted or the wrong account is logged in | Complete the access requirements on Hugging Face and run \`hf auth login\` using the authorized account |
+
+\| \`FileNotFoundError\` related to \`train.pt\` | Missing data or an incorrect path | Check the three \`.pt\` files and run \`main.py\` from \`code/TFC\` |
+
+\| \`ckp_last.pt\` not found | Pre-training has not been run or the experiment directory does not match | Run Pre-training first; check the dataset, seed, and run name |
+
+\| Epochs take a long time | DINOv3 and STFT use substantial resources | Monitor Task Manager; use \`--subset\` for a quick test or consider a GPU |
+
+\| \`UndefinedMetricWarning\` | A class is not predicted by the classifier | Check predictions, label distribution, and the confusion matrix |
+
+\| MLP Accuracy is low and does not improve | The model has not converged or there is an issue in the training/evaluation flow | Check \`trainer.py\`, the checkpoint, optimizer, and data |
+
+\| \`can't open file ...main.py\` | The Terminal is in the wrong directory | From the root directory, run \`cd .\code\TFC\` before calling \`python main.py\` |
+
+**## 10. Experiment Reproducibility and References**
+
+**### 10.1. Reproducibility Configuration**
+
+For others to reproduce the experiment, preserve the following:
+
+\- Source code.
+
+\- Data version and dataset splits.
+
+\- Experimental configuration.
+
+\- Pretrained weights.
+
+\- Seed.
+
+\- Library environment.
+
+Reported configuration:
+
+\| Parameter | Value |
+
+\| --- | --- |
+
+\| Seed | 42 |
+
+\| Learning rate | \`3e-4\` |
+
+\| Pre-training batch size | 8 |
+
+\| Number of Pre-training epochs | 20 |
+
+\| Number of Fine-tuning epochs | 20 |
+
+\| \`L_time\` weight | 0.2 |
+
+\| \`L_freq\` weight | 0.2 |
+
+\| \`L_cross\` weight | 1.0 |
+
+\| SSL coefficient during Fine-tuning | 0.1 |
+
+\| Temperature | 0.2 |
+
+To record library versions in the currently activated environment:
+
+\`\`\`powershell
+
 python -m pip freeze > environment_versions.txt
-Nguồn tham khảo:
-- TF-C — Self-Supervised Contrastive Pre-Training for Time Series via Time-Frequency Consistency (NeurIPS 2022).
-- Website dự án TF-C.
-- DINOv3 ViT-S/16 pretrained trên Hugging Face.
-- Repository TF-C + DINOv3 của bài thực nghiệm.
+
+\`\`\`
+
+**### 10.2. References**
+
+\- **\*\*TF-C:\*\*** Self-Supervised Contrastive Pre-Training for Time Series via Time-Frequency Consistency, NeurIPS 2022.
+
+\- **\*\*DINOv3 pretrained:\*\*** [facebook/dinov3-vits16-pretrain-lvd1689m]\(https\://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m).
