@@ -154,7 +154,9 @@ def data_generator(sourcedata_path, targetdata_path, configs, training_mode,
     def create_loader(dataset, batch_size, shuffle):
         return DataLoader(
             dataset, batch_size=min(batch_size, len(dataset)),
-            shuffle=shuffle, drop_last=False, num_workers=0,
+            shuffle=shuffle,
+            drop_last=(shuffle and len(dataset) > batch_size and len(dataset) % batch_size == 1),
+            num_workers=0,
             generator=torch.Generator().manual_seed(seed)
         )
 
