@@ -41,7 +41,7 @@ def write_dataset(path, count, seed, grouped=False):
         "labels": torch.tensor(label, dtype=torch.long),
     }
     if grouped:
-        dataset["group_ids"] = np.repeat(np.arange(count // 2), 2)
+        dataset["group_ids"] = torch.tensor(np.repeat(np.arange(count // 2), 2))
     torch.save(dataset, path)
 
 
@@ -71,7 +71,6 @@ class PipelineTests(unittest.TestCase):
             self.root / "SleepEEG", self.root / "Epilepsy",
             self.config, "fine_tune_test", seed=42
         )
-        fine_groups = fine.dataset.dataset.indices if False else None
         fine_ids = set(fine.dataset.indices)
         val_ids = set(val.dataset.indices)
         self.assertFalse(fine_ids & val_ids)
