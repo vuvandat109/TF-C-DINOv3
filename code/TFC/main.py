@@ -25,10 +25,6 @@ parser.add_argument('--unfreeze_backbone', action='store_true', help='Fine-tune 
 parser.add_argument('--image_size', default=224, type=int)
 parser.add_argument('--n_fft', default=64, type=int)
 parser.add_argument('--subset', action='store_true', help='Use small subset for debugging')
-parser.add_argument('--validation_fraction', default=0.2, type=float,
-                    help='Fraction of target train.pt reserved for validation')
-parser.add_argument('--epochs', default=None, type=int,
-                    help='Override number of epochs (1 for CI smoke tests)')
 parser.add_argument('--dinov3_loss_time_weight', default=0.2, type=float,
                     help='Intra-time NT-Xent weight on DINOv3 projected embeddings')
 parser.add_argument('--dinov3_loss_frequency_weight', default=0.2, type=float,
@@ -57,11 +53,11 @@ parser.add_argument('--home_path', default=home_dir, type=str,
                     help='Project home directory')
 args, unknown = parser.parse_known_args()
 
-if args.device == 'cuda' and not torch.cuda.is_available():
-    print('CUDA unavailable: falling back to CPU')
-    device = torch.device('cpu')
+with_gpu = torch.cuda.is_available()
+if with_gpu:
+    device = torch.device("cuda")
 else:
-    device = torch.device(args.device)
+    device = torch.device("cpu")
 print('We are using %s now.' %device)
 
 pretrain_dataset = args.pretrain_dataset
@@ -76,10 +72,6 @@ logs_save_dir = args.logs_save_dir
 os.makedirs(logs_save_dir, exist_ok=True)
 exec(f'from config_files.{pretrain_dataset}_Configs import Config as Configs')
 configs = Configs()
-if args.epochs is not None:
-    if args.epochs < 1:
-        parser.error('--epochs must be a positive integer')
-    configs.num_epoch = args.epochs
 # Expose DINOv3-specific objective coefficients to the training loop.
 configs.dinov3_loss_time_weight = args.dinov3_loss_time_weight
 configs.dinov3_loss_frequency_weight = args.dinov3_loss_frequency_weight
@@ -90,11 +82,9 @@ configs.dinov3_finetune_ssl_weight = args.dinov3_finetune_ssl_weight
 # # ##### fix random seeds for reproducibility ########
 SEED = args.seed
 torch.manual_seed(SEED)
-torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 np.random.seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
 #####################################################
 
 experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description, training_mode + f"_seed_{SEED}_dinov3_both")
@@ -121,10 +111,7 @@ logger.debug("=" * 45)
 sourcedata_path = f"../../datasets/{pretrain_dataset}"
 targetdata_path = f"../../datasets/{targetdata}"
 subset = args.subset  # full data by default, use --subset for debugging
-pretrain_dl, fine_train_dl, validation_dl, test_dl = data_generator(
-    sourcedata_path, targetdata_path, configs, training_mode,
-    subset=subset, seed=SEED, validation_fraction=args.validation_fraction
-)
+train_dl, valid_dl, test_dl = data_generator(sourcedata_path, targetdata_path, configs, training_mode, subset = subset)
 logger.debug("Data loaded ...")
 
 # Load Model
@@ -141,7 +128,7 @@ if training_mode == "fine_tune_test":
     load_from = os.path.join(os.path.join(logs_save_dir, experiment_description, run_description,
     f"pre_train_seed_{SEED}_dinov3_both", "saved_models"))
     print("The loading file path", load_from)
-    chkpoint = torch.load(os.path.join(load_from, "ckp_last.pt"), map_location=device, weights_only=True)
+    chkpoint = torch.load(os.path.join(load_from, "ckp_last.pt"), map_location=device)
     pretrained_dict = chkpoint["model_state_dict"]
     TFC_model.load_state_dict(pretrained_dict)
 
@@ -149,8 +136,7 @@ model_optimizer = torch.optim.Adam(TFC_model.parameters(), lr=configs.lr, betas=
 classifier_optimizer = torch.optim.Adam(classifier.parameters(), lr=configs.lr, betas=(configs.beta1, configs.beta2), weight_decay=3e-4)
 
 # Trainer
-Trainer(TFC_model, model_optimizer, classifier, classifier_optimizer,
-        pretrain_dl, fine_train_dl, validation_dl, test_dl,
-        device, logger, configs, experiment_log_dir, training_mode)
+Trainer(TFC_model, model_optimizer, classifier, classifier_optimizer, train_dl, valid_dl, test_dl, device,
+        logger, configs, experiment_log_dir, training_mode)
 
 logger.debug(f"Training time is : {datetime.now()-start_time}")

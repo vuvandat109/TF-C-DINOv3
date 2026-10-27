@@ -1,303 +1,302 @@
-"""Train and evaluate TF-C + DINOv3 without test-set model selection.
+import os
+import sys
+sys.path.append("..")
 
-Pre-train on source only, fine-tune on a disjoint target train partition,
-select the checkpoint by validation macro-F1, then evaluate the held-out
-target test exactly once. Metrics are aggregated over all samples.
-"""
-import csv
-import json
-from pathlib import Path
-
-import numpy as np
-import torch
-from sklearn.metrics import (
-    accuracy_score, confusion_matrix, f1_score, precision_recall_fscore_support,
-    roc_auc_score, average_precision_score,
-)
+from loss import *
+from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix, \
+    average_precision_score, accuracy_score, precision_score,f1_score,recall_score
 from sklearn.neighbors import KNeighborsClassifier
-from torch import nn
-from torch.nn import functional as F
+from model import * 
 
-from dinov3_loss import DINOv3TFCLoss
+def one_hot_encoding(X):
+    X = [int(x) for x in X]
+    n_values = np.max(X) + 1
+    b = np.eye(n_values)[X]
+    return b
+
+def Trainer(model,  model_optimizer, classifier, classifier_optimizer, train_dl, valid_dl, test_dl, device,
+            logger, config, experiment_log_dir, training_mode):
+    # Start training
+    logger.debug("Training started ....")
+
+    criterion = nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(model_optimizer, 'min')
+    if training_mode == 'pre_train':
+        print('Pretraining on source dataset')
+        for epoch in range(1, config.num_epoch + 1):
+            # Train and validate
+            """Train. In fine-tuning, this part is also trained???"""
+            train_loss = model_pretrain(model, model_optimizer, criterion, train_dl, config, device, training_mode)
+            logger.debug(f'\nPre-training Epoch : {epoch} | Train Loss : {train_loss:.4f}')
+
+        os.makedirs(os.path.join(experiment_log_dir, "saved_models"), exist_ok=True)
+        chkpoint = {'model_state_dict': model.state_dict()}
+        torch.save(chkpoint, os.path.join(experiment_log_dir, "saved_models", f'ckp_last.pt'))
+        print('Pretrained model is stored at folder:{}'.format(experiment_log_dir+'saved_models'+'ckp_last.pt'))
+
+    """Fine-tuning and Test"""
+    if training_mode != 'pre_train':
+        """fine-tune"""
+        print('Fine-tune on Fine-tuning set')
+        performance_list = []
+        total_f1 = []
+        KNN_f1 = []
+        global emb_finetune, label_finetune, emb_test, label_test
+
+        for epoch in range(1, config.num_epoch + 1):
+            logger.debug(f'\nEpoch : {epoch}')
+
+            valid_loss, emb_finetune, label_finetune, F1 = model_finetune(model, model_optimizer, valid_dl, config,
+                                  device, training_mode, classifier=classifier, classifier_optimizer=classifier_optimizer)
+            scheduler.step(valid_loss)
 
 
-def _objective(config):
+            # save best fine-tuning model""
+            global arch
+            arch = 'sleepedf2eplipsy'
+            if len(total_f1) == 0 or F1 > max(total_f1):
+                print('update fine-tuned model')
+                os.makedirs('experiments_logs/finetunemodel/', exist_ok=True)
+                torch.save(model.state_dict(), 'experiments_logs/finetunemodel/' + arch + '_model.pt')
+                torch.save(classifier.state_dict(), 'experiments_logs/finetunemodel/' + arch + '_classifier.pt')
+            total_f1.append(F1)
+
+            # evaluate on the test set
+            """Testing set"""
+            logger.debug('Test on Target datasts test set')
+            model.load_state_dict(torch.load('experiments_logs/finetunemodel/' + arch + '_model.pt', map_location=device))
+            classifier.load_state_dict(torch.load('experiments_logs/finetunemodel/' + arch + '_classifier.pt', map_location=device))
+            test_loss, test_acc, test_auc, test_prc, emb_test, label_test, performance = model_test(model, test_dl, config, device, training_mode,
+                                                             classifier=classifier, classifier_optimizer=classifier_optimizer)
+            performance_list.append(performance)
+
+            """Use KNN as another classifier; it's an alternation of the MLP classifier in function model_test. 
+            Experiments show KNN and MLP may work differently in different settings, so here we provide both. """
+            # train classifier: KNN
+            neigh = KNeighborsClassifier(n_neighbors=5)
+            neigh.fit(emb_finetune, label_finetune)
+            knn_acc_train = neigh.score(emb_finetune, label_finetune)
+            # print('KNN finetune acc:', knn_acc_train)
+            representation_test = emb_test.detach().cpu().numpy()
+
+            knn_result = neigh.predict(representation_test)
+            knn_result_score = neigh.predict_proba(representation_test)
+            one_hot_label_test = one_hot_encoding(label_test)
+            # print(classification_report(label_test, knn_result, digits=4))
+            # print(confusion_matrix(label_test, knn_result))
+            knn_acc = accuracy_score(label_test, knn_result)
+            precision = precision_score(label_test, knn_result, average='macro', )
+            recall = recall_score(label_test, knn_result, average='macro', )
+            F1 = f1_score(label_test, knn_result, average='macro')
+            auc = roc_auc_score(one_hot_label_test, knn_result_score, average="macro", multi_class="ovr")
+            prc = average_precision_score(one_hot_label_test, knn_result_score, average="macro")
+            print('KNN Testing: Acc=%.4f| Precision = %.4f | Recall = %.4f | F1 = %.4f | AUROC= %.4f | AUPRC=%.4f'%
+                  (knn_acc, precision, recall, F1, auc, prc))
+            KNN_f1.append(F1)
+        logger.debug("\n################## Best testing performance! #########################")
+        performance_array = np.array(performance_list)
+        best_performance = performance_array[np.argmax(performance_array[:,0], axis=0)]
+        print('Best Testing Performance: Acc=%.4f| Precision = %.4f | Recall = %.4f | F1 = %.4f | AUROC= %.4f '
+              '| AUPRC=%.4f' % (best_performance[0], best_performance[1], best_performance[2], best_performance[3],
+                                best_performance[4], best_performance[5]))
+        print('Best KNN F1', max(KNN_f1))
+
+    logger.debug("\n################## Training is Done! #########################")
+
+def _dinov3_loss_from_config(config):
+    """Create the DINOv3 TF-C objective on the trainable projected embeddings."""
     return DINOv3TFCLoss(
-        temperature=getattr(config, "dinov3_loss_temperature", 0.2),
+        temperature=getattr(config, "dinov3_loss_temperature", config.Context_Cont.temperature),
         time_weight=getattr(config, "dinov3_loss_time_weight", 0.2),
         frequency_weight=getattr(config, "dinov3_loss_frequency_weight", 0.2),
         cross_weight=getattr(config, "dinov3_loss_cross_weight", 1.0),
     )
 
 
-def _forward(model, time_data, frequency_waveform):
-    _, z_time, _, z_frequency = model(time_data, frequency_waveform)
-    return torch.cat([z_time, z_frequency], dim=1), z_time, z_frequency
-
-
-def _epoch_pretrain(model, optimizer, loader, device, config):
+def model_pretrain(model, model_optimizer, criterion, train_loader, config, device, training_mode):
+    """Pretrain DINOv3 branch projectors with explicit time/frequency loss."""
     model.train()
-    objective = _objective(config)
-    losses = []
-    for signal, _, augmented_time, freq_waveform, augmented_freq in loader:
-        if len(signal) < 2:
-            continue
-        signal = signal.to(device)
-        augmented_time = augmented_time.to(device)
-        freq_waveform = freq_waveform.to(device)
-        augmented_freq = augmented_freq.to(device)
-        optimizer.zero_grad(set_to_none=True)
-        _, z_t, z_f = _forward(model, signal, freq_waveform)
-        _, z_t_aug, z_f_aug = _forward(model, augmented_time, augmented_freq)
-        loss, _ = objective(z_t, z_t_aug, z_f, z_f_aug)
+    objective = _dinov3_loss_from_config(config)
+    batch_losses, time_losses, freq_losses, cross_losses = [], [], [], []
+
+    for batch_idx, (data, labels, aug1, data_f, aug1_f) in enumerate(train_loader):
+        if data.shape[0] < 2:
+            continue  # contrastive loss requires at least two samples
+        model_optimizer.zero_grad(set_to_none=True)
+        data, data_f = data.float().to(device), data_f.float().to(device)
+        aug1, aug1_f = aug1.float().to(device), aug1_f.float().to(device)
+
+        # DINOv3 backbone features h_* may be frozen. Compute ALL loss terms
+        # on z_* so both trainable projectors receive gradients.
+        h_t, z_t, h_f, z_f = model(data, data_f)
+        h_t_aug, z_t_aug, h_f_aug, z_f_aug = model(aug1, aug1_f)
+        loss, terms = objective(z_t, z_t_aug, z_f, z_f_aug)
         loss.backward()
-        optimizer.step()
-        losses.append(float(loss.detach()))
-    if not losses:
-        raise ValueError("Pretraining requires batches containing at least two samples")
-    return float(np.mean(losses))
+        model_optimizer.step()
+
+        batch_losses.append(loss.detach().item())
+        time_losses.append(terms["time"].item())
+        freq_losses.append(terms["frequency"].item())
+        cross_losses.append(terms["cross_time_frequency"].item())
+
+    if not batch_losses:
+        raise ValueError("Pretraining requires a batch with at least two samples")
+    print("DINOv3-TF-C pretrain | total={:.4f} | L_time={:.4f} | L_freq={:.4f} | L_cross={:.4f}".format(
+        np.mean(batch_losses), np.mean(time_losses), np.mean(freq_losses), np.mean(cross_losses)
+    ))
+    return torch.tensor(batch_losses).mean()
 
 
-def _evaluate(model, classifier, loader, device, expected_classes):
-    model.eval()
-    classifier.eval()
-    all_labels, all_predictions, all_probabilities, all_embeddings = [], [], [], []
-    total_loss, total_samples = 0.0, 0
-    with torch.inference_mode():
-        for signal, label, _, freq_waveform, _ in loader:
-            signal, freq_waveform = signal.to(device), freq_waveform.to(device)
-            label = label.long().to(device)
-            embeddings, _, _ = _forward(model, signal, freq_waveform)
-            logits = classifier(embeddings)
-            total_loss += float(F.cross_entropy(logits, label, reduction="sum"))
-            total_samples += len(label)
-            all_labels.append(label.cpu().numpy())
-            all_predictions.append(logits.argmax(1).cpu().numpy())
-            all_probabilities.append(logits.softmax(dim=1).cpu().numpy())
-            all_embeddings.append(embeddings.cpu().numpy())
-    if total_samples == 0:
-        raise ValueError("Evaluation loader is empty")
-    labels = np.concatenate(all_labels)
-    predictions = np.concatenate(all_predictions)
-    probabilities = np.concatenate(all_probabilities)
-    embeddings = np.concatenate(all_embeddings)
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        labels, predictions, labels=np.arange(expected_classes),
-        average="macro", zero_division=0,
-    )
-    result = {
-        "loss": total_loss / total_samples,
-        "accuracy": float(accuracy_score(labels, predictions)),
-        "precision_macro": float(precision),
-        "recall_macro": float(recall),
-        "f1_macro": float(f1),
-        "samples": int(total_samples),
-    }
-    # Binary/multiclass probability metrics need all expected classes to
-    # occur in the evaluation split. Report null otherwise, not fake zeros.
-    if set(np.unique(labels)) == set(range(expected_classes)):
-        try:
-            if expected_classes == 2:
-                result["auroc"] = float(roc_auc_score(labels, probabilities[:, 1]))
-                result["auprc"] = float(average_precision_score(labels, probabilities[:, 1]))
-            else:
-                onehot = np.eye(expected_classes)[labels]
-                result["auroc"] = float(roc_auc_score(
-                    labels, probabilities, multi_class="ovr", average="macro"
-                ))
-                result["auprc"] = float(average_precision_score(
-                    onehot, probabilities, average="macro"
-                ))
-        except ValueError:
-            result["auroc"] = None
-            result["auprc"] = None
-    else:
-        result["auroc"] = None
-        result["auprc"] = None
-    return result, labels, predictions, probabilities, embeddings
-
-
-def _epoch_finetune(model, classifier, model_optimizer, classifier_optimizer,
-                    loader, device, config):
+def model_finetune(model, model_optimizer, val_dl, config, device, training_mode, classifier=None, classifier_optimizer=None):
+    global labels, pred_numpy, fea_concat_flat
     model.train()
     classifier.train()
-    objective = _objective(config)
-    total, samples = 0.0, 0
-    for signal, labels, augmented_time, freq_waveform, augmented_freq in loader:
-        signal = signal.to(device)
-        freq_waveform = freq_waveform.to(device)
-        labels = labels.long().to(device)
-        augmented_time = augmented_time.to(device)
-        augmented_freq = augmented_freq.to(device)
-        model_optimizer.zero_grad(set_to_none=True)
-        classifier_optimizer.zero_grad(set_to_none=True)
 
-        embeddings, z_t, z_f = _forward(model, signal, freq_waveform)
-        logits = classifier(embeddings)
-        loss = F.cross_entropy(logits, labels)
-        ssl_weight = float(getattr(config, "dinov3_finetune_ssl_weight", 0.1))
-        if ssl_weight and len(labels) >= 2:
-            _, z_t_aug, z_f_aug = _forward(model, augmented_time, augmented_freq)
-            ssl_loss, _ = objective(z_t, z_t_aug, z_f, z_f_aug)
-            loss = loss + ssl_weight * ssl_loss
+    total_loss = []
+    total_acc = []
+    total_auc = []  # it should be outside of the loop
+    total_prc = []
+
+    criterion = nn.CrossEntropyLoss()
+    objective = _dinov3_loss_from_config(config)
+    outs = np.array([])
+    trgs = np.array([])
+    feas = np.array([])
+
+    for data, labels, aug1, data_f, aug1_f in val_dl:
+        # print('Fine-tuning: {} of target samples'.format(labels.shape[0]))
+        data, labels = data.float().to(device), labels.long().to(device)
+        data_f = data_f.float().to(device)
+        aug1 = aug1.float().to(device)
+        aug1_f = aug1_f.float().to(device)
+
+        """if random initialization:"""
+        model_optimizer.zero_grad()  # The gradients are zero, but the parameters are still randomly initialized.
+        classifier_optimizer.zero_grad()  # the classifier is newly added and randomly initialized
+
+        """Produce embeddings"""
+        h_t, z_t, h_f, z_f = model(data, data_f)
+        h_t_aug, z_t_aug, h_f_aug, z_f_aug = model(aug1, aug1_f)
+        # New DINOv3-specific contrastive objective on projected z_* features.
+        ssl_loss, ssl_parts = objective(z_t, z_t_aug, z_f, z_f_aug)
+
+        """Add supervised classifier: 1) it's unique to finetuning. 2) this classifier will also be used in test."""
+        fea_concat = torch.cat((z_t, z_f), dim=1)
+        predictions = classifier(fea_concat)
+        fea_concat_flat = fea_concat.reshape(fea_concat.shape[0], -1)
+        loss_p = criterion(predictions, labels)
+
+        loss = loss_p + getattr(config, "dinov3_finetune_ssl_weight", 0.1) * ssl_loss
+
+        acc_bs = labels.eq(predictions.detach().argmax(dim=1)).float().mean()
+        onehot_label = F.one_hot(labels)
+        pred_numpy = predictions.detach().cpu().numpy()
+
+        try:
+            auc_bs = roc_auc_score(onehot_label.detach().cpu().numpy(), pred_numpy, average="macro", multi_class="ovr" )
+        except:
+            auc_bs = 0.0
+        prc_bs = average_precision_score(onehot_label.detach().cpu().numpy(), pred_numpy)
+
+        total_acc.append(acc_bs)
+        total_auc.append(auc_bs)
+        total_prc.append(prc_bs)
+        total_loss.append(loss.item())
         loss.backward()
         model_optimizer.step()
         classifier_optimizer.step()
-        total += float(loss.detach()) * len(labels)
-        samples += len(labels)
-    if samples == 0:
-        raise ValueError("Empty fine-tuning loader")
-    return total / samples
+
+        if training_mode != "pre_train":
+            pred = predictions.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            outs = np.append(outs, pred.cpu().numpy())
+            trgs = np.append(trgs, labels.data.cpu().numpy())
+            feas = np.append(feas, fea_concat_flat.data.cpu().numpy())
+
+    feas = feas.reshape([len(trgs), -1])  # produce the learned embeddings
+
+    labels_numpy = labels.detach().cpu().numpy()
+    pred_numpy = np.argmax(pred_numpy, axis=1)
+    precision = precision_score(labels_numpy, pred_numpy, average='macro', )
+    recall = recall_score(labels_numpy, pred_numpy, average='macro', )
+    F1 = f1_score(labels_numpy, pred_numpy, average='macro', )
+    ave_loss = torch.tensor(total_loss).mean()
+    ave_acc = torch.tensor(total_acc).mean()
+    ave_auc = torch.tensor(total_auc).mean()
+    ave_prc = torch.tensor(total_prc).mean()
+
+    print(' Finetune: loss = %.4f| Acc=%.4f | Precision = %.4f | Recall = %.4f | F1 = %.4f| AUROC=%.4f | AUPRC = %.4f'
+          % (ave_loss, ave_acc*100, precision * 100, recall * 100, F1 * 100, ave_auc * 100, ave_prc *100))
+
+    return ave_loss, feas, trgs, F1
 
 
-def _store_report(output_dir, history, report, labels, predictions, n_classes):
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "evaluation.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    with (output_dir / "history.csv").open("w", newline="", encoding="utf-8") as f:
-        if history:
-            writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
-            writer.writeheader()
-            writer.writerows(history)
-    matrix = confusion_matrix(labels, predictions, labels=list(range(n_classes)))
-    np.savetxt(output_dir / "confusion_matrix.csv", matrix, delimiter=",", fmt="%d")
-    with (output_dir / "test_predictions.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["true_label", "predicted_label"])
-        writer.writerows(zip(labels.tolist(), predictions.tolist()))
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+def model_test(model,  test_dl, config,  device, training_mode, classifier=None, classifier_optimizer=None):
+    model.eval()
+    classifier.eval()
 
-        if history:
-            fig, ax = plt.subplots()
-            epochs = [item["epoch"] for item in history]
-            ax.plot(epochs, [item["train_loss"] for item in history], label="Train loss")
-            ax.plot(epochs, [item["validation_loss"] for item in history], label="Validation loss")
-            ax.set(xlabel="Epoch", ylabel="Loss", title="Fine-tuning loss")
-            ax.legend()
-            fig.tight_layout()
-            fig.savefig(output_dir / "loss_curve.png", dpi=150)
-            plt.close(fig)
-            fig, ax = plt.subplots()
-            ax.plot(epochs, [item["validation_f1_macro"] for item in history])
-            ax.set(xlabel="Epoch", ylabel="Macro F1", title="Validation F1")
-            fig.tight_layout()
-            fig.savefig(output_dir / "validation_f1.png", dpi=150)
-            plt.close(fig)
-        fig, ax = plt.subplots()
-        im = ax.imshow(matrix, cmap="Blues")
-        fig.colorbar(im, ax=ax)
-        ax.set(xlabel="Predicted", ylabel="True", title="Held-out test confusion matrix")
-        fig.tight_layout()
-        fig.savefig(output_dir / "confusion_matrix.png", dpi=150)
-        plt.close(fig)
-    except ImportError:
-        print("Optional plots skipped: install matplotlib to generate PNG files")
+    total_loss = []
+    total_acc = []
+    total_auc = []
+    total_prc = []
 
+    criterion = nn.CrossEntropyLoss() # the loss for downstream classifier
+    outs = np.array([])
+    trgs = np.array([])
+    emb_test_all = []
 
-def Trainer(model, model_optimizer, classifier, classifier_optimizer,
-            pretrain_dl, fine_train_dl, validation_dl, test_dl,
-            device, logger, config, experiment_log_dir, training_mode):
-    output = Path(experiment_log_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    n_classes = int(config.num_classes_target)
-    epochs = int(config.num_epoch)
+    with torch.no_grad():
+        labels_numpy_all, pred_numpy_all = np.zeros(1), np.zeros(1)
+        for data, labels, _,data_f, _ in test_dl:
+            data, labels = data.float().to(device), labels.long().to(device)
+            data_f = data_f.float().to(device)
 
-    if training_mode == "pre_train":
-        pretraining_history = []
-        for epoch in range(1, epochs + 1):
-            loss = _epoch_pretrain(model, model_optimizer, pretrain_dl, device, config)
-            pretraining_history.append({"epoch": epoch, "loss": loss})
-            logger.debug(f"Pretraining {epoch}/{epochs}: loss={loss:.5f}")
-            print(f"Pretraining epoch {epoch}/{epochs}: loss={loss:.5f}")
-        saved = output / "saved_models"
-        saved.mkdir(parents=True, exist_ok=True)
-        torch.save({"model_state_dict": model.state_dict()}, saved / "ckp_last.pt")
-        (output / "pretrain_history.json").write_text(
-            json.dumps(pretraining_history, indent=2), encoding="utf-8"
-        )
-        print(f"Saved pretrained checkpoint: {saved / 'ckp_last.pt'}")
-        return
-    if training_mode != "fine_tune_test":
-        raise ValueError(f"Unknown training_mode: {training_mode}")
+            """Add supervised classifier: 1) it's unique to finetuning. 2) this classifier will also be used in test"""
+            h_t, z_t, h_f, z_f = model(data, data_f)
+            fea_concat = torch.cat((z_t, z_f), dim=1)
+            predictions_test = classifier(fea_concat)
+            fea_concat_flat = fea_concat.reshape(fea_concat.shape[0], -1)
+            emb_test_all.append(fea_concat_flat)
 
-    best_f1, best_loss, best_epoch = -1.0, float("inf"), 0
-    checkpoint = output / "saved_models" / "best_validation.pt"
-    checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    history = []
-    for epoch in range(1, epochs + 1):
-        train_loss = _epoch_finetune(
-            model, classifier, model_optimizer, classifier_optimizer,
-            fine_train_dl, device, config,
-        )
-        val_metrics, _, _, _, _ = _evaluate(
-            model, classifier, validation_dl, device, n_classes
-        )
-        history.append({
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "validation_loss": val_metrics["loss"],
-            "validation_accuracy": val_metrics["accuracy"],
-            "validation_f1_macro": val_metrics["f1_macro"],
-        })
-        f1, val_loss = val_metrics["f1_macro"], val_metrics["loss"]
-        if f1 > best_f1 + 1e-10 or (
-            abs(f1 - best_f1) <= 1e-10 and val_loss < best_loss
-        ):
-            best_f1, best_loss, best_epoch = f1, val_loss, epoch
-            torch.save({
-                "model_state_dict": model.state_dict(),
-                "classifier_state_dict": classifier.state_dict(),
-                "epoch": epoch, "validation_f1_macro": f1,
-            }, checkpoint)
-        print(
-            f"Fine-tune {epoch}/{epochs}: train_loss={train_loss:.4f} "
-            f"val_loss={val_loss:.4f} val_F1={f1:.4f}"
-        )
-    # No test call occurs anywhere inside the training/validation loop.
-    state = torch.load(checkpoint, map_location=device, weights_only=True)
-    model.load_state_dict(state["model_state_dict"])
-    classifier.load_state_dict(state["classifier_state_dict"])
-    test_metrics, y_true, y_pred, _, test_emb = _evaluate(
-        model, classifier, test_dl, device, n_classes
-    )
-    report = {
-        "model": "TF-C + DINOv3",
-        "selected_epoch": best_epoch,
-        "checkpoint_selection": "validation_macro_f1_then_loss",
-        "best_validation_f1_macro": best_f1,
-        "test": test_metrics,
-        "warning": "Do not interpret subset test scores as a full-dataset benchmark.",
-    }
+            loss = criterion(predictions_test, labels)
+            acc_bs = labels.eq(predictions_test.detach().argmax(dim=1)).float().mean()
+            onehot_label = F.one_hot(labels)
+            pred_numpy = predictions_test.detach().cpu().numpy()
+            labels_numpy = labels.detach().cpu().numpy()
+            try:
+                auc_bs = roc_auc_score(onehot_label.detach().cpu().numpy(), pred_numpy,
+                                   average="macro", multi_class="ovr")
+            except:
+                auc_bs = 0.0
+            prc_bs = average_precision_score(onehot_label.detach().cpu().numpy(), pred_numpy, average="macro")
+            pred_numpy = np.argmax(pred_numpy, axis=1)
 
-    # KNN uses representations of the fine-tune TRAIN set only.
-    _, train_labels, _, _, train_emb = _evaluate(
-        model, classifier, fine_train_dl, device, n_classes
-    )
-    if len(train_labels) >= 2:
-        neighbor_count = min(5, len(train_labels))
-        neighbor = KNeighborsClassifier(n_neighbors=neighbor_count)
-        neighbor.fit(train_emb, train_labels)
-        knn_preds = neighbor.predict(test_emb)
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            y_true, knn_preds, labels=np.arange(n_classes),
-            average="macro", zero_division=0,
-        )
-        report["knn_test"] = {
-            "accuracy": float(accuracy_score(y_true, knn_preds)),
-            "precision_macro": float(precision),
-            "recall_macro": float(recall),
-            "f1_macro": float(f1),
-            "neighbors": neighbor_count,
-        }
-    _store_report(output, history, report, y_true, y_pred, n_classes)
-    print(
-        f"FINAL HELD-OUT TEST: accuracy={test_metrics['accuracy']:.4f} "
-        f"macro_F1={test_metrics['f1_macro']:.4f}, "
-        f"best_val_epoch={best_epoch}"
-    )
-    logger.debug(f"Final held-out test: {json.dumps(report)}")
-    print(f"Saved evaluation files in: {output}")
+            total_acc.append(acc_bs)
+            total_auc.append(auc_bs)
+            total_prc.append(prc_bs)
+
+            total_loss.append(loss.item())
+            pred = predictions_test.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            outs = np.append(outs, pred.cpu().numpy())
+            trgs = np.append(trgs, labels.data.cpu().numpy())
+            labels_numpy_all = np.concatenate((labels_numpy_all, labels_numpy))
+            pred_numpy_all = np.concatenate((pred_numpy_all, pred_numpy))
+    labels_numpy_all = labels_numpy_all[1:]
+    pred_numpy_all = pred_numpy_all[1:]
+
+    # print('Test classification report', classification_report(labels_numpy_all, pred_numpy_all))
+    # print(confusion_matrix(labels_numpy_all, pred_numpy_all))
+    precision = precision_score(labels_numpy_all, pred_numpy_all, average='macro', )
+    recall = recall_score(labels_numpy_all, pred_numpy_all, average='macro', )
+    F1 = f1_score(labels_numpy_all, pred_numpy_all, average='macro', )
+    acc = accuracy_score(labels_numpy_all, pred_numpy_all, )
+
+    total_loss = torch.tensor(total_loss).mean()
+    total_acc = torch.tensor(total_acc).mean()
+    total_auc = torch.tensor(total_auc).mean()
+    total_prc = torch.tensor(total_prc).mean()
+
+    performance = [acc * 100, precision * 100, recall * 100, F1 * 100, total_auc * 100, total_prc * 100]
+    print('MLP Testing: Acc=%.4f| Precision = %.4f | Recall = %.4f | F1 = %.4f | AUROC= %.4f | AUPRC=%.4f'
+          % (acc*100, precision * 100, recall * 100, F1 * 100, total_auc*100, total_prc*100))
+    emb_test_all = torch.concat(tuple(emb_test_all))
+    return total_loss, total_acc, total_auc, total_prc, emb_test_all, trgs, performance
