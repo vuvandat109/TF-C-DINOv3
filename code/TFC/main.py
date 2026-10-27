@@ -27,6 +27,8 @@ parser.add_argument('--n_fft', default=64, type=int)
 parser.add_argument('--subset', action='store_true', help='Use small subset for debugging')
 parser.add_argument('--validation_fraction', default=0.2, type=float,
                     help='Fraction of target train.pt reserved for validation')
+parser.add_argument('--epochs', default=None, type=int,
+                    help='Override number of epochs (1 for CI smoke tests)')
 parser.add_argument('--dinov3_loss_time_weight', default=0.2, type=float,
                     help='Intra-time NT-Xent weight on DINOv3 projected embeddings')
 parser.add_argument('--dinov3_loss_frequency_weight', default=0.2, type=float,
@@ -74,6 +76,10 @@ logs_save_dir = args.logs_save_dir
 os.makedirs(logs_save_dir, exist_ok=True)
 exec(f'from config_files.{pretrain_dataset}_Configs import Config as Configs')
 configs = Configs()
+if args.epochs is not None:
+    if args.epochs < 1:
+        parser.error('--epochs must be a positive integer')
+    configs.num_epoch = args.epochs
 # Expose DINOv3-specific objective coefficients to the training loop.
 configs.dinov3_loss_time_weight = args.dinov3_loss_time_weight
 configs.dinov3_loss_frequency_weight = args.dinov3_loss_frequency_weight
