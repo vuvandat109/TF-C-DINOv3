@@ -1,130 +1,173 @@
-import torch
-from torch.utils.data import DataLoader
-from torch.utils.data import Dataset
-import os
+"""Dataloaders for TF-C + DINOv3 with a held-out validation set.
+
+Target train.pt is split BEFORE data augmentation. Target test.pt is never
+used to select a checkpoint or tune hyperparameters. Use subject/recording
+identifiers when available to keep related windows in the same partition.
+"""
+import warnings
+from pathlib import Path
+
 import numpy as np
-from augmentations import DataTransform_FD, DataTransform_TD
-import torch.fft as fft
+import torch
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from torch.utils.data import DataLoader, Dataset, Subset
 
-def generate_freq(dataset, config):
-    X_train = dataset["samples"]
-    y_train = dataset['labels']
-    # shuffle
-    data = list(zip(X_train, y_train))
-    np.random.shuffle(data)
-    data = data[:10000] # take a subset for testing.
-    X_train, y_train = zip(*data)
-    X_train, y_train = torch.stack(list(X_train), dim=0), torch.stack(list(y_train), dim=0)
+GROUP_KEYS = ("source_ids", "group_ids", "recording_ids", "subject_ids", "parent_ids")
 
-    if len(X_train.shape) < 3:
-        X_train = X_train.unsqueeze(2)
 
-    if X_train.shape.index(min(X_train.shape)) != 1:  # make sure the Channels in second dim
-        X_train = X_train.permute(0, 2, 1)
+def _load_series(path, config):
+    dataset = torch.load(Path(path), map_location="cpu", weights_only=True)
+    if not isinstance(dataset, dict) or not {"samples", "labels"} <= dataset.keys():
+        raise ValueError(f"{path}: expected a dict with 'samples' and 'labels'")
+    signals = torch.as_tensor(dataset["samples"], dtype=torch.float32)
+    labels = torch.as_tensor(dataset["labels"], dtype=torch.long).flatten()
+    if signals.ndim == 2:
+        signals = signals.unsqueeze(1)
+    elif signals.ndim == 3 and signals.shape[1] > signals.shape[2]:
+        signals = signals.transpose(1, 2)
+    if signals.ndim != 3 or len(signals) != len(labels):
+        raise ValueError(f"{path}: incompatible signals/labels shapes")
+    required_length = int(config.TSlength_aligned)
+    if signals.shape[-1] < required_length:
+        raise ValueError(f"{path}: need at least {required_length} time steps")
+    # Retain the original one-channel TF-C benchmark convention.
+    signals = signals[:, :1, :required_length].contiguous()
+    groups = None
+    for name in GROUP_KEYS:
+        if name in dataset:
+            value = dataset[name]
+            groups = np.asarray(value).reshape(-1)
+            if len(groups) != len(labels):
+                raise ValueError(f"{path}: {name} length mismatch")
+            break
+    if len(labels) < 2:
+        raise ValueError(f"{path}: fewer than two samples")
+    return signals, labels, groups
 
-    """Align the TS length between source and target datasets"""
-    X_train = X_train[:, :1, :int(config.TSlength_aligned)] # take the first 178 samples
 
-    if isinstance(X_train, np.ndarray):
-        x_data = torch.from_numpy(X_train)
+def _subset_indices(indices, labels, max_count, seed):
+    if len(indices) <= max_count:
+        return np.asarray(indices, dtype=int)
+    indices = np.asarray(indices, dtype=int)
+    counts = np.unique(labels[indices].numpy(), return_counts=True)[1]
+    classes = len(counts)
+    use_stratify = counts.min() >= 2 and max_count >= classes
+    try:
+        selected, _ = train_test_split(
+            indices, train_size=max_count, random_state=seed,
+            stratify=labels[indices].numpy() if use_stratify else None
+        )
+    except ValueError:
+        selected, _ = train_test_split(indices, train_size=max_count, random_state=seed)
+    return np.sort(selected)
+
+
+def _split_target(labels, groups, validation_fraction, seed):
+    indices = np.arange(len(labels))
+    if len(indices) < 4:
+        raise ValueError("Need at least four target training samples")
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between 0 and 1")
+    if groups is not None:
+        if len(np.unique(groups)) < 2:
+            raise ValueError("Group-based validation needs at least two groups")
+        splitter = GroupShuffleSplit(
+            n_splits=1, test_size=validation_fraction, random_state=seed
+        )
+        train, validation = next(splitter.split(indices, labels.numpy(), groups=groups))
+        if set(groups[train]) & set(groups[validation]):
+            raise AssertionError("Leaked group between train and validation")
     else:
-        x_data = X_train
+        warnings.warn(
+            "No subject/recording IDs found; record-level split cannot rule "
+            "out leakage from overlapping or augmented source windows.",
+            RuntimeWarning
+        )
+        target = labels.numpy()
+        classes, counts = np.unique(target, return_counts=True)
+        n_validation = int(np.ceil(len(target) * validation_fraction))
+        stratify = (
+            target if counts.min() >= 2 and n_validation >= len(classes)
+            and len(target) - n_validation >= len(classes) else None
+        )
+        train, validation = train_test_split(
+            indices, test_size=validation_fraction, random_state=seed,
+            stratify=stratify
+        )
+    if len(train) < 2 or len(validation) < 1:
+        raise ValueError("Train/validation partitions too small")
+    return np.sort(train), np.sort(validation)
 
-    """Transfer x_data to Frequency Domain. If use fft.fft, the output has the same shape; if use fft.rfft, 
-    the output shape is half of the time window."""
-
-    x_data_f = fft.fft(x_data).abs() #/(window_length) # rfft for real value inputs.
-    return (X_train, y_train, x_data_f)
 
 class Load_Dataset(Dataset):
-    # Initialize your data, download, etc.
-    def __init__(self, dataset, config, training_mode, target_dataset_size=64, subset=False):
-        super(Load_Dataset, self).__init__()
-        self.training_mode = training_mode
-        X_train = dataset["samples"]
-        y_train = dataset["labels"]
-        # shuffle
-        data = list(zip(X_train, y_train))
-        np.random.shuffle(data)
-        X_train, y_train = zip(*data)
-        X_train, y_train = torch.stack(list(X_train), dim=0), torch.stack(list(y_train), dim=0)
+    """Return (time, label, augmented_time, freq_wave, augmented_freq_wave).
 
-        if len(X_train.shape) < 3:
-            X_train = X_train.unsqueeze(2)
-
-        if X_train.shape.index(min(X_train.shape)) != 1:  # make sure the Channels in second dim
-            X_train = X_train.permute(0, 2, 1)
-
-        """Align the TS length between source and target datasets"""
-        X_train = X_train[:, :1, :int(config.TSlength_aligned)] # take the first 178 samples
-
-        """Subset for debugging"""
-        if subset == True:
-            subset_size = target_dataset_size * 10 #30 #7 # 60*1
-            """if the dimension is larger than 178, take the first 178 dimensions. If multiple channels, take the first channel"""
-            X_train = X_train[:subset_size]
-            y_train = y_train[:subset_size]
-            print('Using subset for debugging, the datasize is:', y_train.shape[0])
-
-        if isinstance(X_train, np.ndarray):
-            self.x_data = torch.from_numpy(X_train)
-            self.y_data = torch.from_numpy(y_train).long()
-        else:
-            self.x_data = X_train
-            self.y_data = y_train
-
-        """Transfer x_data to Frequency Domain. If use fft.fft, the output has the same shape; if use fft.rfft, 
-        the output shape is half of the time window."""
-
-        # DINOv3 frequency encoder consumes raw waveforms; its image adapter
-        # applies STFT to obtain a true 2-D time-frequency spectrogram.
-        self.x_data_f = self.x_data.float().clone()
-        self.len = X_train.shape[0]
-
-        """Augmentation"""
-        if training_mode == "pre_train":  # no need to apply Augmentations in other modes
-            self.aug1 = DataTransform_TD(self.x_data, config)
-            # Frequency-domain augmentation, returned as waveform after iRFFT.
-            # This keeps the STFT encoder input compatible with the main branch.
-            spectrum = torch.fft.rfft(self.x_data_f, dim=-1)
-            mask = (torch.rand_like(spectrum.real) > 0.1)
-            spectrum_aug = spectrum * mask
-            self.aug1_f = torch.fft.irfft(spectrum_aug, n=self.x_data_f.shape[-1], dim=-1)
-
-    def __getitem__(self, index):
-        if self.training_mode == "pre_train":
-            return self.x_data[index], self.y_data[index], self.aug1[index],  \
-                   self.x_data_f[index], self.aug1_f[index]
-        else:
-            return self.x_data[index], self.y_data[index], self.x_data[index], \
-                   self.x_data_f[index], self.x_data_f[index]
+    DINOv3's frequency adapter generates STFT from the waveform internally.
+    Augmentation is stochastic ONLY for training datasets.
+    """
+    def __init__(self, signals, labels, augment=False):
+        self.signals, self.labels, self.augment = signals, labels, augment
 
     def __len__(self):
-        return self.len
+        return len(self.labels)
+
+    def __getitem__(self, index):
+        signal, label = self.signals[index], self.labels[index]
+        if not self.augment:
+            return signal, label, signal, signal, signal
+
+        std = signal.std(unbiased=False).clamp_min(1e-3)
+        gain = 1 + 0.05 * torch.randn((), dtype=signal.dtype)
+        time_aug = signal * gain + 0.02 * std * torch.randn_like(signal)
+
+        spectrum = torch.fft.rfft(signal, dim=-1)
+        keep = torch.rand(spectrum.shape, device=signal.device) > 0.10
+        freq_aug = torch.fft.irfft(spectrum * keep, n=signal.shape[-1], dim=-1)
+        return signal, label, time_aug, signal, freq_aug
 
 
-def data_generator(sourcedata_path, targetdata_path, configs, training_mode, subset=True):
-    train_dataset = torch.load(os.path.join(sourcedata_path, "train.pt"))
-    finetune_dataset = torch.load(os.path.join(targetdata_path, "train.pt"))  # train.pt
-    test_dataset = torch.load(os.path.join(targetdata_path, "test.pt"))  # test.pt
-    """In pre-training: 
-    train_dataset: [371055, 1, 178] from SleepEEG.    
-    finetune_dataset: [60, 1, 178], test_dataset: [11420, 1, 178] from Epilepsy"""
+def data_generator(sourcedata_path, targetdata_path, configs, training_mode,
+                   subset=False, seed=42, validation_fraction=0.2):
+    """Return four loaders: pretrain, fine_train, validation, held-out test."""
+    src_x, src_y, _ = _load_series(Path(sourcedata_path) / "train.pt", configs)
+    train_x, train_y, groups = _load_series(Path(targetdata_path) / "train.pt", configs)
+    test_x, test_y, _ = _load_series(Path(targetdata_path) / "test.pt", configs)
+    train_ids, val_ids = _split_target(train_y, groups, validation_fraction, seed)
 
-    # subset = True # if true, use a subset for debugging.
-    train_dataset = Load_Dataset(train_dataset, configs, training_mode, target_dataset_size=configs.batch_size, subset=subset) # for self-supervised, the data are augmented here
-    finetune_dataset = Load_Dataset(finetune_dataset, configs, training_mode, target_dataset_size=configs.target_batch_size, subset=subset)
-    test_dataset = Load_Dataset(test_dataset, configs, training_mode,
-                                target_dataset_size=configs.target_batch_size, subset=subset)
+    if subset:
+        src_ids = _subset_indices(np.arange(len(src_y)), src_y,
+                                  int(configs.batch_size) * 10, seed)
+        src_x, src_y = src_x[src_ids], src_y[src_ids]
+        train_ids = _subset_indices(train_ids, train_y,
+                                    int(configs.target_batch_size) * 10, seed)
+        val_ids = _subset_indices(val_ids, train_y,
+                                  int(configs.target_batch_size) * 2, seed)
+        test_ids = _subset_indices(np.arange(len(test_y)), test_y,
+                                   int(configs.target_batch_size) * 10, seed)
+        test_x, test_y = test_x[test_ids], test_y[test_ids]
 
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=configs.batch_size,
-                                               shuffle=True, drop_last=configs.drop_last,
-                                               num_workers=0)
-    finetune_loader = torch.utils.data.DataLoader(dataset=finetune_dataset, batch_size=configs.target_batch_size,
-                                               shuffle=True, drop_last=configs.drop_last,
-                                               num_workers=0)
-    test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=configs.target_batch_size,
-                                              shuffle=True, drop_last=False,
-                                              num_workers=0)
+    pretrain_set = Load_Dataset(src_x, src_y, augment=True)
+    fine_train_set = Subset(Load_Dataset(train_x, train_y, augment=True), train_ids.tolist())
+    validation_set = Subset(Load_Dataset(train_x, train_y), val_ids.tolist())
+    test_set = Load_Dataset(test_x, test_y)
 
-    return train_loader, finetune_loader, test_loader
+    def create_loader(dataset, batch_size, shuffle):
+        return DataLoader(
+            dataset, batch_size=min(batch_size, len(dataset)),
+            shuffle=shuffle,
+            drop_last=(shuffle and len(dataset) > batch_size and len(dataset) % batch_size == 1),
+            num_workers=0,
+            generator=torch.Generator().manual_seed(seed)
+        )
+
+    print(
+        f"Split sizes | pretrain={len(pretrain_set)}, "
+        f"fine_train={len(fine_train_set)}, validation={len(validation_set)}, "
+        f"test={len(test_set)}"
+    )
+    return (
+        create_loader(pretrain_set, configs.batch_size, True),
+        create_loader(fine_train_set, configs.target_batch_size, True),
+        create_loader(validation_set, configs.target_batch_size, False),
+        create_loader(test_set, configs.target_batch_size, False)
+    )
